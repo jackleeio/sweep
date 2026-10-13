@@ -137,8 +137,12 @@ final class ScanSummaryTests: XCTestCase {
             item(.buildCaches, 7, .keep(reason: "最近在用")),
             item(.workCopies, 900, .keep(reason: "仅展示")),
         ], date: Date())
-        XCTAssertEqual(summary[.buildCaches], RuleSummary(deletableCount: 2, deletableBytes: 150, keptCount: 1, keptBytes: 7))
-        XCTAssertEqual(summary[.workCopies], RuleSummary(deletableCount: 0, deletableBytes: 0, keptCount: 1, keptBytes: 900))
+        XCTAssertEqual(summary[.buildCaches]?.deletableCount, 2)
+        XCTAssertEqual(summary[.buildCaches]?.deletableBytes, 150)
+        XCTAssertEqual(summary[.buildCaches]?.keptCount, 1)
+        XCTAssertEqual(summary[.buildCaches]?.keptBytes, 7)
+        XCTAssertEqual(summary[.workCopies]?.keptBytes, 900)
+        XCTAssertEqual(summary[.workCopies]?.deletableCount, 0)
         XCTAssertNil(summary[.conversations])
         XCTAssertEqual(summary.deletableBytes, 150)
         XCTAssertEqual(summary.deletableCount, 2)

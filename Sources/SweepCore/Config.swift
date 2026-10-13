@@ -103,7 +103,17 @@ public struct Config: Codable, Equatable {
         public static let builtinRoots = ["~/Library/Caches"]
         /// 名字以这些开头的不碰：系统缓存，以及名义上是缓存、实际是装好的浏览器内核的目录（删了不会自动恢复）
         public static let builtinSkipPrefixes = ["com.apple.", "ms-playwright", "Cypress"]
+        /// 名字里含这些词的视为 AI 工具或 agent 的缓存（不区分大小写）。
+        public static let aiToolKeywords = [
+            "openai", "chatgpt", "codex", "claude", "anthropic", "bnbot", "clawmoney", "spareai", "manus", "trae",
+            "windsurf", "exafunction", "cursor", "todesktop.230313mzl4w4u92", "mmx-agent", "matrix", "gemini", "goose",
+            "opencode", "kimi", "bloop", "codewhisperer", "ccswitch", "superwhisper", "wispr", "dayflow", "comet",
+            "doubao", "copilot", "perplexity", "ollama", "lmstudio", "huggingface", "qoder", "grok", "minimax",
+            "deepseek", "zoe-desktop", "neo-cli", "beads", "com.meta.endo", "conversationcache",
+        ]
         public var enabled = true
+        /// 保留 AI 工具和 agent 的缓存，只清其他应用的。
+        public var keepAITools = true
         public var extraSkipPrefixes: [String] = []
         public var roots: [String] { Self.builtinRoots }
         public var skipPrefixes: [String] { Self.builtinSkipPrefixes + extraSkipPrefixes }
@@ -111,6 +121,7 @@ public struct Config: Codable, Equatable {
         public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             enabled = try c.value(.enabled, default: true)
+            keepAITools = try c.value(.keepAITools, default: true)
             extraSkipPrefixes = try c.value(.extraSkipPrefixes, default: [])
         }
     }

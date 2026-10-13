@@ -1,15 +1,26 @@
 import AppKit
 import ServiceManagement
+import SweepCore
 import SwiftUI
 
 @main
 enum Main {
     @MainActor
     static func main() {
-        // 调试入口：Sweep --snapshot <png 路径> [--expanded]，把面板离屏渲染成图片后退出
+        // 调试入口：Sweep --snapshot <png 路径> [--open <规则名|pins|history|settings>] [--confirming]
+        // 把面板离屏渲染成图片后退出
         let args = CommandLine.arguments
         if let i = args.firstIndex(of: "--snapshot"), i + 1 < args.count {
-            Snapshot.render(to: args[i + 1], expanded: args.contains("--expanded"), confirming: args.contains("--confirming"))
+            var open: PanelView.Section?
+            if let j = args.firstIndex(of: "--open"), j + 1 < args.count {
+                switch args[j + 1] {
+                case "pins": open = .pins
+                case "history": open = .history
+                case "settings": open = .settings
+                default: open = RuleID(rawValue: args[j + 1]).map { .rule($0) }
+                }
+            }
+            Snapshot.render(to: args[i + 1], open: open, confirming: args.contains("--confirming"))
             return
         }
         // 调试入口：打印登录项注册状态
@@ -49,13 +60,13 @@ struct SweepMenuApp: App {
 
 @MainActor
 enum Snapshot {
-    static func render(to path: String, expanded: Bool, confirming: Bool) {
+    static func render(to path: String, open: PanelView.Section?, confirming: Bool) {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
 
         let model = AppModel(live: false)
         model.confirming = confirming
-        let content = PanelView(expanded: expanded)
+        let content = PanelView(open: open)
             .environmentObject(model)
             .background(Color(nsColor: .windowBackgroundColor))
         let host = NSHostingView(rootView: content)

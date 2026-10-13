@@ -159,11 +159,45 @@ public enum Notifier {
     }
 }
 
+public struct ScanItem: Codable, Equatable {
+    public var path: String
+    public var bytes: Int64
+    public var reason: String
+}
+
+public struct KeptGroup: Codable, Equatable {
+    public var reason: String
+    public var count: Int
+    public var bytes: Int64
+}
+
 public struct RuleSummary: Codable, Equatable {
     public var deletableCount: Int
     public var deletableBytes: Int64
     public var keptCount: Int
     public var keptBytes: Int64
+    /// 可清理项里最大的几个，界面展开时显示。
+    public var top: [ScanItem] = []
+    /// 保留的项按原因分组。
+    public var kept: [KeptGroup] = []
+
+    public init(deletableCount: Int = 0, deletableBytes: Int64 = 0, keptCount: Int = 0, keptBytes: Int64 = 0) {
+        self.deletableCount = deletableCount
+        self.deletableBytes = deletableBytes
+        self.keptCount = keptCount
+        self.keptBytes = keptBytes
+    }
+
+    /// 旧版本存的摘要没有明细字段，缺失时按空处理。
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        deletableCount = try c.decode(Int.self, forKey: .deletableCount)
+        deletableBytes = try c.decode(Int64.self, forKey: .deletableBytes)
+        keptCount = try c.decode(Int.self, forKey: .keptCount)
+        keptBytes = try c.decode(Int64.self, forKey: .keptBytes)
+        top = try c.decodeIfPresent([ScanItem].self, forKey: .top) ?? []
+        kept = try c.decodeIfPresent([KeptGroup].self, forKey: .kept) ?? []
+    }
 }
 
 /// 一次扫描的汇总，界面用它立即显示上次结果。
@@ -175,18 +209,20 @@ public struct ScanSummary: Codable, Equatable {
     public var deletableBytes: Int64 { rules.values.reduce(0) { $0 + $1.deletableBytes } }
     public var deletableCount: Int { rules.values.reduce(0) { $0 + $1.deletableCount } }
 
+    private static let topCount = 8
+
     public static func make(from candidates: [Candidate], date: Date) -> ScanSummary {
         var rules: [String: RuleSummary] = [:]
-        for candidate in candidates {
-            var entry = rules[candidate.rule.rawValue] ?? RuleSummary(deletableCount: 0, deletableBytes: 0, keptCount: 0, keptBytes: 0)
-            if candidate.isDelete {
-                entry.deletableCount += 1
-                entry.deletableBytes += candidate.bytes
-            } else {
-                entry.keptCount += 1
-                entry.keptBytes += candidate.bytes
-            }
-            rules[candidate.rule.rawValue] = entry
+        for (rule, items) in Dictionary(grouping: candidates, by: \.rule) {
+            let deletable = items.filter(\.isDelete).sorted { $0.bytes > $1.bytes }
+            let kept = items.filter { !$0.isDelete }
+            var entry = RuleSummary(deletableCount: deletable.count, deletableBytes: deletable.reduce(0) { $0 + $1.bytes },
+                                    keptCount: kept.count, keptBytes: kept.reduce(0) { $0 + $1.bytes })
+            entry.top = deletable.prefix(topCount).map { ScanItem(path: $0.url.path, bytes: $0.bytes, reason: $0.reason) }
+            entry.kept = Dictionary(grouping: kept, by: \.reason)
+                .map { KeptGroup(reason: $0.key, count: $0.value.count, bytes: $0.value.reduce(0) { $0 + $1.bytes }) }
+                .sorted { ($0.bytes, $1.reason) > ($1.bytes, $0.reason) }
+            rules[rule.rawValue] = entry
         }
         return ScanSummary(date: date, rules: rules)
     }
@@ -203,4 +239,30 @@ public struct ScanSummary: Codable, Equatable {
 extension Env {
     public var scanFile: URL { supportDir.appendingPathComponent("last-scan.json") }
     public var previewFile: URL { supportDir.appendingPathComponent("preview.txt") }
+}
+
+extension RuleID {
+    /// 一两句话说明这条规则管什么、什么时候清。阈值取自当前设置。
+    public func detail(_ config: Config) -> String {
+        let idle = "\(Format.number(config.idleDays)) 天"
+        switch self {
+        case .buildCaches:
+            return "项目里的 .next、bun 编译残留和 Tauri 的 target。\(idle)没更新，或单个超过 \(Format.number(config.buildCaches.sizeCapGB)) GB 时清理，下次构建会重新生成。"
+        case .dependencies:
+            return "闲置项目的 node_modules 和能重建的虚拟环境。项目 \(Format.number(config.dependencies.idleDays)) 天没有改动时清理，回到项目后重新安装即可。"
+        case .agentTemp:
+            return "Agent 构建时建的临时目录（~/.cache/bnbot-* 等）。\(idle)没更新时清理。"
+        case .conversations:
+            return "Codex 和 Claude 的会话记录。\(idle)没更新且没有标记时删除，删除后无法恢复。"
+        case .packageCaches:
+            return "Yarn、npm、pnpm、bun、uv、pip 的下载缓存和 Docker Scout。合计超过 \(Format.number(config.packageCaches.totalCapGB)) GB 时清空，之后按需重新下载。"
+        case .appCaches:
+            let kept = config.appCaches.keepAITools ? "系统缓存、浏览器测试内核和 AI 工具的缓存不动" : "系统缓存和浏览器测试内核不动"
+            return "~/Library/Caches 里其他应用的缓存。\(idle)没更新时清理；\(kept)。"
+        case .artifacts:
+            return "Codex 生成的图片和视频。\(Format.number(config.artifacts.idleDays)) 天没更新时删除，删除后无法恢复。"
+        case .workCopies:
+            return "worktree 和构建副本，里面可能有未提交的代码，所以只显示体积，不自动清理。"
+        }
+    }
 }

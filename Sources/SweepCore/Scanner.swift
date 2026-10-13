@@ -457,8 +457,14 @@ public struct Scanner {
         }
         return byPath(entries.parallelMap { entry in
             let m = Measure.measure(entry.url)
+            let name = entry.url.lastPathComponent.lowercased()
+            // AI 工具和 agent 的缓存默认保留，但仍然列出，让用户看得到占了多少
+            let isAITool = Config.AppCaches.aiToolKeywords.contains(where: name.contains)
+            let verdict: Verdict = config.appCaches.keepAITools && isAITool
+                ? .keep(reason: "AI 工具的缓存，按设置保留")
+                : idleVerdict(m, threshold: cacheIdleDays)
             return Candidate(rule: .appCaches, url: entry.url, root: entry.root, bytes: m.bytes,
-                             lastActivity: m.latest, verdict: idleVerdict(m, threshold: cacheIdleDays))
+                             lastActivity: m.latest, verdict: verdict)
         })
     }
 

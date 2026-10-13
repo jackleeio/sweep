@@ -464,3 +464,163 @@ final class BuiltInListTests: XCTestCase {
         XCTAssertFalse(text.contains("bnbot-"))
     }
 }
+
+final class AIToolCacheTests: XCTestCase {
+    private func home() -> TempHome {
+        let h = TempHome()
+        for name in ["com.openai.atlas", "ChatGPTHelper", "ai.bnbot.app", "BNBot", "com.exafunction.windsurf.ShipIt",
+                     "manus-updater", "com.google.GeminiMacOS", "claude-cli-nodejs", "com.todesktop.230313mzl4w4u92"] {
+            h.file("Library/Caches/\(name)/data.bin", bytes: 20_000)
+        }
+        h.file("Library/Caches/Vivaldi/data.bin", bytes: 20_000)
+        h.age("Library/Caches", daysAgo: 200)
+        return h
+    }
+
+    /// AI 工具和 agent 的缓存默认保留，但仍然列出来，让用户看得到占了多少。
+    func testAIToolCachesAreListedButKeptByDefault() {
+        let c = scan(home(), .appCaches)
+        XCTAssertEqual(c.deletable.map(\.url.lastPathComponent), ["Vivaldi"])
+        XCTAssertEqual(c.count, 10)
+        XCTAssertTrue(c.filter { !$0.isDelete }.allSatisfy { $0.reason.contains("AI") })
+    }
+
+    func testAIToolCachesStayKeptInTightMode() {
+        XCTAssertEqual(scan(home(), .appCaches, tight: true).deletable.map(\.url.lastPathComponent), ["Vivaldi"])
+    }
+
+    func testAIToolCachesAreCleanedOnceTheUserOptsIn() {
+        var config = Config()
+        config.appCaches.keepAITools = false
+        XCTAssertEqual(scan(home(), .appCaches, config: config).deletable.count, 10)
+    }
+
+    func testKeepAIToolsDefaultsToOnAndSurvivesRoundTrip() throws {
+        let h = TempHome()
+        XCTAssertTrue(Config().appCaches.keepAITools)
+        var c = Config()
+        c.appCaches.keepAITools = false
+        try c.save(to: h.path("config.json"))
+        XCTAssertFalse(try Config.load(from: h.path("config.json")).appCaches.keepAITools)
+    }
+}
+
+final class RichSummaryTests: XCTestCase {
+    private func item(_ path: String, _ bytes: Int64, _ verdict: Verdict, rule: RuleID = .buildCaches) -> Candidate {
+        Candidate(rule: rule, url: URL(fileURLWithPath: path), root: URL(fileURLWithPath: "/"), bytes: bytes,
+                  lastActivity: nil, verdict: verdict)
+    }
+
+    func testKeepsTheLargestDeletableItemsOfEachRule() {
+        let items = (1...12).map { item("/p/c\($0)", Int64($0), .delete(reason: "\($0) 天没更新")) }
+        let rule = ScanSummary.make(from: items, date: Date())[.buildCaches]!
+        XCTAssertEqual(rule.top.count, 8)
+        XCTAssertEqual(rule.top.first, ScanItem(path: "/p/c12", bytes: 12, reason: "12 天没更新"))
+        XCTAssertEqual(rule.top.map(\.bytes), [12, 11, 10, 9, 8, 7, 6, 5])
+        XCTAssertEqual(rule.deletableCount, 12)
+    }
+
+    func testGroupsKeptItemsByReasonLargestFirst() {
+        let rule = ScanSummary.make(from: [
+            item("/a", 10, .keep(reason: "最近在用")),
+            item("/b", 20, .keep(reason: "最近在用")),
+            item("/c", 500, .keep(reason: "AI 工具的缓存，按设置保留")),
+        ], date: Date())[.buildCaches]!
+        XCTAssertEqual(rule.kept, [
+            KeptGroup(reason: "AI 工具的缓存，按设置保留", count: 1, bytes: 500),
+            KeptGroup(reason: "最近在用", count: 2, bytes: 30),
+        ])
+    }
+
+    func testSummarySavedByOlderVersionStillLoads() throws {
+        let h = TempHome()
+        let old = #"{"date":"2026-10-13T13:35:00Z","rules":{"buildCaches":{"deletableBytes":5,"deletableCount":1,"keptBytes":2,"keptCount":1}}}"#
+        let f = h.file("last-scan.json", text: old)
+        let summary = try XCTUnwrap(ScanSummary.load(from: f))
+        XCTAssertEqual(summary[.buildCaches]?.deletableBytes, 5)
+        XCTAssertEqual(summary[.buildCaches]?.top, [])
+    }
+}
+
+final class HistoryTests: XCTestCase {
+    private func home() -> TempHome {
+        let h = TempHome()
+        h.file("Projects/old/package.json", text: "{}")
+        h.file("Projects/old/.next/blob.bin", bytes: 40_000)
+        h.age("Projects/old/.next", daysAgo: 9)
+        return h
+    }
+
+    func testManualRunIsAppendedToHistory() throws {
+        let h = home()
+        let outcome = try Runner(env: h.env()).run(mode: .manual)
+        let history = SweepState.load(from: h.env().stateFile).history
+        XCTAssertEqual(history.count, 1)
+        XCTAssertEqual(history[0].kind, "manual")
+        XCTAssertEqual(history[0].deletedCount, 1)
+        XCTAssertEqual(history[0].freedBytes, outcome.report?.freedBytes)
+    }
+
+    func testTickRecordsWhyItRan() throws {
+        let h = home()
+        var s = SweepState()
+        s.armed = true
+        s.lastDailyRun = h.now
+        try s.save(to: h.env().stateFile)
+        _ = try Runner(env: h.env(free: { 60 * Int64(Format.gigabyte) })).tick()
+        XCTAssertEqual(SweepState.load(from: h.env().stateFile).history.map(\.kind), ["emergency"])
+    }
+
+    func testDryRunIsNotRecorded() throws {
+        let h = home()
+        _ = try Runner(env: h.env()).run(mode: .manual, dryRun: true)
+        XCTAssertEqual(SweepState.load(from: h.env().stateFile).history, [])
+    }
+
+    func testHistoryKeepsOnlyTheMostRecentRuns() throws {
+        let h = home()
+        var s = SweepState()
+        s.history = (0..<30).map { RunRecord(date: h.now, kind: "daily", deletedCount: $0, freedBytes: 1, errorCount: 0) }
+        try s.save(to: h.env().stateFile)
+        _ = try Runner(env: h.env()).run(mode: .manual)
+        let history = SweepState.load(from: h.env().stateFile).history
+        XCTAssertEqual(history.count, 20)
+        XCTAssertEqual(history.last?.kind, "manual")
+        XCTAssertEqual(history.first?.deletedCount, 11)
+    }
+
+    func testStateSavedByOlderVersionStillLoadsAndKeepsArmedFlag() throws {
+        let h = TempHome()
+        h.file("Library/Application Support/Sweep/state.json", text: #"{"armed":true,"lastDeletedCount":0,"lastErrorCount":0,"lastFreedBytes":0,"totalFreedBytes":0}"#)
+        let state = SweepState.load(from: h.env().stateFile)
+        XCTAssertTrue(state.armed)
+        XCTAssertEqual(state.history, [])
+    }
+}
+
+final class RuleDetailTests: XCTestCase {
+    /// 说明文字里的阈值要跟着设置走，否则界面会和实际行为对不上。
+    func testDetailReflectsConfiguredThresholds() {
+        var config = Config()
+        config.idleDays = 5
+        config.buildCaches.sizeCapGB = 12
+        config.dependencies.idleDays = 21
+        config.packageCaches.totalCapGB = 35
+        XCTAssertTrue(RuleID.buildCaches.detail(config).contains("5 天"))
+        XCTAssertTrue(RuleID.buildCaches.detail(config).contains("12 GB"))
+        XCTAssertTrue(RuleID.dependencies.detail(config).contains("21 天"))
+        XCTAssertTrue(RuleID.packageCaches.detail(config).contains("35 GB"))
+        XCTAssertTrue(RuleID.conversations.detail(config).contains("5 天"))
+    }
+
+    func testAppCacheDetailSaysWhetherAIToolCachesAreKept() {
+        var config = Config()
+        XCTAssertTrue(RuleID.appCaches.detail(config).contains("AI"))
+        config.appCaches.keepAITools = false
+        XCTAssertFalse(RuleID.appCaches.detail(config).contains("AI"))
+    }
+
+    func testEveryRuleHasADetail() {
+        for rule in RuleID.allCases { XCTAssertFalse(rule.detail(Config()).isEmpty, "\(rule)") }
+    }
+}

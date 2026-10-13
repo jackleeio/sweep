@@ -15,6 +15,11 @@ public enum Format {
         return i == 0 ? "\(n) B" : String(format: value >= 100 ? "%.0f %@" : "%.1f %@", value, units[i])
     }
 
+    /// 整数不带小数点，其余保留原样。
+    public static func number(_ value: Double) -> String {
+        value == value.rounded() ? "\(Int(value))" : "\(value)"
+    }
+
     public static func gb(_ value: Double) -> String {
         value == value.rounded() ? "\(Int(value))G" : "\(value)G"
     }

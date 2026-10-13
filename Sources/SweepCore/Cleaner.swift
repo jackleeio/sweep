@@ -115,6 +115,15 @@ public struct Cleaner {
     }
 }
 
+public struct RunRecord: Codable, Equatable {
+    public var date: Date
+    /// manual / daily / emergency
+    public var kind: String
+    public var deletedCount: Int
+    public var freedBytes: Int64
+    public var errorCount: Int
+}
+
 public struct SweepState: Codable, Equatable {
     /// 用户确认过首次清理后才为 true；为 false 时定时任务只扫描不删除。
     public var armed = false
@@ -129,8 +138,32 @@ public struct SweepState: Codable, Equatable {
     public var lastTightRun: Date?
     /// 上次提醒「清理后空间仍然不足」的时间。
     public var lastLowSpaceNotice: Date?
+    /// 最近若干次清理的记录，新的在后。
+    public var history: [RunRecord] = []
+
+    private static let historyLimit = 20
 
     public init() {}
+
+    /// 字段缺失时取默认值，这样加新字段不会让旧的状态文件读不出来（那会把 armed 重置掉）。
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        armed = try c.decodeIfPresent(Bool.self, forKey: .armed) ?? false
+        lastRun = try c.decodeIfPresent(Date.self, forKey: .lastRun)
+        lastFreedBytes = try c.decodeIfPresent(Int64.self, forKey: .lastFreedBytes) ?? 0
+        lastDeletedCount = try c.decodeIfPresent(Int.self, forKey: .lastDeletedCount) ?? 0
+        lastErrorCount = try c.decodeIfPresent(Int.self, forKey: .lastErrorCount) ?? 0
+        totalFreedBytes = try c.decodeIfPresent(Int64.self, forKey: .totalFreedBytes) ?? 0
+        lastDailyRun = try c.decodeIfPresent(Date.self, forKey: .lastDailyRun)
+        lastTightRun = try c.decodeIfPresent(Date.self, forKey: .lastTightRun)
+        lastLowSpaceNotice = try c.decodeIfPresent(Date.self, forKey: .lastLowSpaceNotice)
+        history = try c.decodeIfPresent([RunRecord].self, forKey: .history) ?? []
+    }
+
+    mutating func append(_ record: RunRecord) {
+        history.append(record)
+        if history.count > Self.historyLimit { history.removeFirst(history.count - Self.historyLimit) }
+    }
 
     /// 读不出来就当作全新状态。这是安全方向：armed 回到 false，需要重新确认。
     public static func load(from url: URL) -> SweepState {
@@ -249,7 +282,7 @@ public struct Runner {
             index += 1
         }
 
-        record(outcome.reports, in: &state)
+        record(outcome.reports, kind: outcome.action == .emergency ? "emergency" : "daily", in: &state)
         outcome.freeAfter = env.freeBytes()
         if outcome.freeAfter < floor, since(state.lastLowSpaceNotice) >= Self.noticeInterval {
             outcome.stillLow = true
@@ -266,13 +299,15 @@ public struct Runner {
         return today <= env.now ? today : calendar.date(byAdding: .day, value: -1, to: today) ?? today
     }
 
-    private func record(_ reports: [RunReport], in state: inout SweepState) {
+    private func record(_ reports: [RunReport], kind: String, in state: inout SweepState) {
         let freed = reports.reduce(Int64(0)) { $0 + $1.freedBytes }
         state.lastRun = env.now.wholeSeconds
         state.lastFreedBytes = freed
         state.lastDeletedCount = reports.reduce(0) { $0 + $1.deleted.count }
         state.lastErrorCount = reports.reduce(0) { $0 + $1.errors.count }
         state.totalFreedBytes += freed
+        state.append(RunRecord(date: env.now.wholeSeconds, kind: kind, deletedCount: state.lastDeletedCount,
+                               freedBytes: freed, errorCount: state.lastErrorCount))
     }
 
     /// 单次清理。mode 为 scheduled 且用户尚未确认时只扫描；tick() 是定时任务实际使用的入口。
@@ -295,7 +330,7 @@ public struct Runner {
         outcome.report = report
 
         if !dryRun {
-            record([report], in: &state)
+            record([report], kind: mode == .manual ? "manual" : "daily", in: &state)
             try state.save(to: env.stateFile)
         }
         return outcome

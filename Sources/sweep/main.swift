@@ -2,11 +2,11 @@ import Foundation
 import SweepCore
 
 let usage = """
-sweep — 定时清理构建缓存和 agent 对话
+sweep — 定时清理构建缓存、依赖、应用缓存和 agent 对话
 
-  sweep scan [--all]              只扫描，列出会清理什么（不删除）
-  sweep run [--dry-run]           立即清理
-  sweep run --scheduled           定时任务入口；首次清理未确认前只扫描
+  sweep scan [--all] [--tight]    只扫描，列出会清理什么（不删除）
+  sweep run [--dry-run] [--tight] 立即清理；--tight 按空间不足时的收紧规则
+  sweep run --scheduled           定时任务入口，自行判断是否该清理
   sweep keep <标签>               标记当前 agent 对话，不被清理
   sweep unkeep <标签|标记串>      取消标记
   sweep pins                      列出已标记的对话
@@ -51,41 +51,69 @@ func scan() throws {
 }
 
 func run() throws {
-    let scheduled = args.contains("--scheduled")
-    let dryRun = args.contains("--dry-run")
-    let outcome: RunOutcome
+    if args.contains("--scheduled") { return try scheduledTick() }
+
+    let outcome = try Runner(env: env).run(mode: .manual, dryRun: args.contains("--dry-run"), tight: args.contains("--tight"))
+    if let report = outcome.report {
+        let verb = report.dryRun ? "将清理" : "已清理"
+        print("\(verb) \(report.deleted.count) 项，\(Format.bytes(report.freedBytes))。可用空间 \(Format.bytes(env.freeBytes()))。")
+        for error in report.errors { print("  失败：\(error)") }
+    }
+    for item in outcome.blocked {
+        print("  暂未清理：\(item.url.path)（\(Format.bytes(item.bytes))，\(item.reason)）")
+    }
+}
+
+/// 定时任务每隔几分钟调用一次。绝大多数时候什么都不做，此时也不输出，免得日志空转。
+func scheduledTick() throws {
+    let outcome: TickOutcome
     do {
-        outcome = try Runner(env: env).run(mode: scheduled ? .scheduled : .manual, dryRun: dryRun)
+        outcome = try Runner(env: env).tick()
     } catch {
-        if scheduled { Notifier.post(title: "Sweep 清理失败", body: "配置文件无法读取，本次没有清理任何东西。") }
+        // 配置坏掉时每次都会失败，提醒一天一次就够了
+        let marker = env.supportDir.appendingPathComponent(".config-error-notified")
+        let last = (try? FileManager.default.attributesOfItem(atPath: marker.path))?[.modificationDate] as? Date
+        if last.map({ env.now.timeIntervalSince($0) > 24 * 3600 }) ?? true {
+            try? Data().write(to: marker)
+            Notifier.post(title: "Sweep 清理失败", body: "配置文件无法读取，清理已暂停，没有删除任何东西。")
+        }
         throw error
     }
 
-    let free = Format.bytes(Disk.usage(at: env.home).free)
-    if let report = outcome.report {
-        let verb = report.dryRun ? "将清理" : "已清理"
-        print("\(verb) \(report.deleted.count) 项，\(Format.bytes(report.freedBytes))。可用空间 \(free)。")
-        for error in report.errors { print("  失败：\(error)") }
-        if scheduled, !report.dryRun, report.freedBytes >= 100 << 20 || !report.errors.isEmpty {
-            let failed = report.errors.isEmpty ? "" : "，\(report.errors.count) 项失败，详见日志"
-            Notifier.post(title: "Sweep 清理完成",
-                          body: "清理 \(report.deleted.count) 项，回收 \(Format.bytes(report.freedBytes))\(failed)。可用空间 \(free)。")
-        }
-    } else {
-        print("自动清理尚未开启：有 \(outcome.pendingCount) 项、\(Format.bytes(outcome.pendingBytes)) 可清理。")
-        print("先用 sweep scan --all 或菜单栏的 Sweep 查看清单，确认后运行 sweep arm 开启。")
-        if scheduled, outcome.pendingBytes > 0 {
+    let free = Format.bytes(outcome.freeAfter)
+    switch outcome.action {
+    case .none:
+        return
+    case .pendingConfirmation:
+        print("\(stamp(env.now)) 等待确认：有 \(outcome.pendingCount) 项、\(Format.bytes(outcome.pendingBytes)) 可清理")
+        if outcome.pendingBytes > 0 {
             Notifier.post(title: "Sweep 等待确认",
                           body: "有 \(Format.bytes(outcome.pendingBytes)) 可以清理。在菜单栏的 Sweep 里查看清单并确认后，才会开始自动清理。")
         }
-    }
+    case .daily, .emergency:
+        let emergency = outcome.action == .emergency
+        let deleted = outcome.reports.reduce(0) { $0 + $1.deleted.count }
+        let freed = outcome.reports.reduce(Int64(0)) { $0 + $1.freedBytes }
+        let errors = outcome.reports.flatMap(\.errors)
+        print("\(stamp(env.now)) \(emergency ? "空间不足，立即清理" : "每日清理")：\(deleted) 项，回收 \(Format.bytes(freed))，可用 \(free)")
+        for error in errors { print("  失败：\(error)") }
 
-    for item in outcome.blocked {
-        let project = item.url.deletingLastPathComponent().lastPathComponent
-        print("  暂未清理：\(item.url.path)（\(Format.bytes(item.bytes))，\(item.reason)）")
-        if scheduled {
-            Notifier.post(title: "Sweep：缓存过大但正在使用",
-                          body: "\(project) 的 \(item.url.lastPathComponent) 已有 \(Format.bytes(item.bytes))，相关进程停掉后会自动清理。")
+        if emergency || freed >= 100_000_000 || !errors.isEmpty {
+            let failed = errors.isEmpty ? "" : "，\(errors.count) 项失败，详见日志"
+            Notifier.post(title: emergency ? "Sweep：空间不足，已立即清理" : "Sweep 清理完成",
+                          body: "清理 \(deleted) 项，回收 \(Format.bytes(freed))\(failed)。可用空间 \(free)。")
+        }
+        if outcome.stillLow {
+            Notifier.post(title: "Sweep：空间仍然不足",
+                          body: "清理后可用空间只有 \(free)，仍低于警戒线。能自动清的已经清完，剩下的需要手动处理。")
+        }
+        // 「正在使用」的提醒只在每日清理时发，紧急清理可能一小时一次，太吵
+        if !emergency {
+            for item in outcome.blocked {
+                let project = item.url.deletingLastPathComponent().lastPathComponent
+                Notifier.post(title: "Sweep：缓存过大但正在使用",
+                              body: "\(project) 的 \(item.url.lastPathComponent) 已有 \(Format.bytes(item.bytes))，相关进程停掉后会自动清理。")
+            }
         }
     }
 }
