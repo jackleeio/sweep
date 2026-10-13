@@ -306,10 +306,16 @@ public struct Scanner {
             return (match, m, verdict, nil)
         }
 
+        // 全局 link 的命令、技能链接、定时任务会在项目「闲置」时照样用到它的依赖
+        let references = env.externalReferences().map { $0.lowercased() }
+
         return byPath(judged.map { match, m, preliminary, tracking in
             var verdict = preliminary
             if case .delete = verdict {
-                if case .untracked? = tracking {
+                let project = (realPath(match.project) ?? match.project.path).lowercased()
+                if references.contains(where: { $0 == project || $0.hasPrefix(project + "/") }) {
+                    verdict = .keep(reason: "被全局命令、技能或定时任务引用")
+                } else if case .untracked? = tracking {
                     if env.processProbe.isInUse(projectDir: match.project, kind: .dependencies) {
                         verdict = .keep(reason: "项目里有进程在运行")
                     }

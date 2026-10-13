@@ -27,9 +27,10 @@ public struct Cleaner {
 
     public init(env: Env) { self.env = env }
 
-    public func run(_ candidates: [Candidate], dryRun: Bool) -> RunReport {
+    /// progress 在每一项处理完（且日志已落盘）后调用。
+    /// 日志逐项写而不是攒到最后：清理可能中途被终止，已经删掉的必须留有记录。
+    public func run(_ candidates: [Candidate], dryRun: Bool, progress: ((DeletedItem) -> Void)? = nil) -> RunReport {
         var report = RunReport(date: env.now, dryRun: dryRun)
-        var lines: [String] = []
         let fm = FileManager.default
 
         for candidate in candidates {
@@ -42,7 +43,7 @@ public struct Cleaner {
             }.first
             if let (url, rejection) = rejected {
                 report.errors.append("\(url.path)：校验未通过（\(rejection)）")
-                lines.append(logLine("REFUSE", candidate, "\(rejection)"))
+                appendLog(logLine("REFUSE", candidate, "\(rejection)"))
                 continue
             }
 
@@ -58,7 +59,7 @@ public struct Cleaner {
                 }
                 if let failure {
                     report.errors.append(failure)
-                    lines.append(logLine("ERROR", candidate, failure))
+                    appendLog(logLine("ERROR", candidate, failure))
                     continue
                 }
                 if Self.prunedRules.contains(candidate.rule) {
@@ -66,12 +67,11 @@ public struct Cleaner {
                 }
             }
 
-            report.deleted.append(DeletedItem(rule: candidate.rule, path: candidate.url.path,
-                                              bytes: candidate.bytes, reason: reason))
-            lines.append(logLine(dryRun ? "DRYRUN" : "DELETE", candidate, reason))
+            let item = DeletedItem(rule: candidate.rule, path: candidate.url.path, bytes: candidate.bytes, reason: reason)
+            report.deleted.append(item)
+            appendLog(logLine(dryRun ? "DRYRUN" : "DELETE", candidate, reason))
+            progress?(item)
         }
-
-        appendLog(lines)
         return report
     }
 
@@ -92,8 +92,7 @@ public struct Cleaner {
         return "\(stamp) \(action) \(candidate.rule.rawValue) \(Format.bytes(candidate.bytes)) \(candidate.url.path) — \(detail)"
     }
 
-    private func appendLog(_ lines: [String]) {
-        guard !lines.isEmpty else { return }
+    private func appendLog(_ line: String) {
         let fm = FileManager.default
         try? fm.createDirectory(at: env.logDir, withIntermediateDirectories: true)
 
@@ -104,7 +103,7 @@ public struct Cleaner {
             try? fm.moveItem(at: env.logFile, to: old)
         }
 
-        let data = Data((lines.joined(separator: "\n") + "\n").utf8)
+        let data = Data((line + "\n").utf8)
         if let handle = try? FileHandle(forWritingTo: env.logFile) {
             defer { try? handle.close() }
             _ = try? handle.seekToEnd()

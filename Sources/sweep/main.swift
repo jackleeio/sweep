@@ -11,6 +11,7 @@ sweep — 定时清理构建缓存、依赖、应用缓存和 agent 对话
   sweep unkeep <标签|标记串>      取消标记
   sweep pins                      列出已标记的对话
   sweep status                    查看状态
+  sweep refs                      列出被全局命令、技能、定时任务引用的项目路径
   sweep arm | disarm              开启 / 关闭自动清理
 """
 
@@ -86,7 +87,8 @@ func scheduledTick() throws {
         return
     case .pendingConfirmation:
         print("\(stamp(env.now)) 等待确认：有 \(outcome.pendingCount) 项、\(Format.bytes(outcome.pendingBytes)) 可清理")
-        if outcome.pendingBytes > 0 {
+        // 只有值得一清的时候才打扰
+        if outcome.pendingBytes >= Int64(Format.gigabyte) {
             Notifier.post(title: "Sweep 等待确认",
                           body: "有 \(Format.bytes(outcome.pendingBytes)) 可以清理。在菜单栏的 Sweep 里查看清单并确认后，才会开始自动清理。")
         }
@@ -173,6 +175,15 @@ func status() throws {
     print("已标记对话：\((try? pins.all().count) ?? 0) 个")
 }
 
+/// 列出项目目录之外指向项目内部的引用。被引用的项目，依赖不会被清理。
+func listReferences() {
+    let config = (try? Config.load(from: env.configFile)) ?? Config()
+    let roots = config.projectRoots.map { env.expand($0).path.lowercased() + "/" }
+    let inside = Set(env.externalReferences().filter { ref in roots.contains { ref.lowercased().hasPrefix($0) } })
+    guard !inside.isEmpty else { return print("没有发现指向项目目录的外部引用。") }
+    for ref in inside.sorted() { print(ref) }
+}
+
 func setArmed(_ armed: Bool) throws {
     var state = SweepState.load(from: env.stateFile)
     state.armed = armed
@@ -188,6 +199,7 @@ do {
     case "unkeep": try unkeep()
     case "pins": try listPins()
     case "status": try status()
+    case "refs": listReferences()
     case "arm": try setArmed(true)
     case "disarm": try setArmed(false)
     default: print(usage)

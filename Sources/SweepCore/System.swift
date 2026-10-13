@@ -74,7 +74,9 @@ extension Env {
     public static func live() -> Env {
         let override = ProcessInfo.processInfo.environment["SWEEP_HOME"].map { URL(fileURLWithPath: $0) }
         let home = override ?? FileManager.default.homeDirectoryForCurrentUser
-        return Env(home: home, now: Date(), processProbe: LiveProcessProbe(), freeBytes: { Disk.usage(at: home).free })
+        var env = Env(home: home, now: Date(), processProbe: LiveProcessProbe(), freeBytes: { Disk.usage(at: home).free })
+        env.externalReferences = { ExternalReferences.collect(home: home) }
+        return env
     }
 }
 
@@ -264,5 +266,71 @@ extension RuleID {
         case .workCopies:
             return "worktree 和构建副本，里面可能有未提交的代码，所以只显示体积，不自动清理。"
         }
+    }
+}
+
+/// 找出项目目录之外、指向项目内部的引用。被引用的项目即使很久没改动，依赖也在被使用。
+public enum ExternalReferences {
+    /// 这些目录里的符号链接解析后的真实路径。`@scope` 目录再往下看一层（npm 的 scoped 包）。
+    public static func linkTargets(in directories: [URL]) -> [String] {
+        let fm = FileManager.default
+        var out: [String] = []
+        func visit(_ dir: URL, scoped: Bool) {
+            for name in (try? fm.contentsOfDirectory(atPath: dir.path)) ?? [] {
+                let url = dir.appendingPathComponent(name)
+                switch FileKind.of(url) {
+                case .symlink:
+                    if let real = realPath(url) { out.append(real) }
+                case .directory where !scoped && name.hasPrefix("@"):
+                    visit(url, scoped: true)
+                default:
+                    continue
+                }
+            }
+        }
+        for dir in directories { visit(dir, scoped: false) }
+        return out
+    }
+
+    /// 定时任务配置里出现的所有绝对路径，包括写在 shell 命令字符串中间的。
+    public static func launchAgentPaths(in directory: URL) -> [String] {
+        var out: [String] = []
+        func collect(_ value: Any) {
+            if let text = value as? String {
+                for token in text.split(whereSeparator: { " \t\n\"';&|=<>()".contains($0) }) {
+                    if token.hasPrefix("/") {
+                        out.append(String(token))
+                    } else if token.hasPrefix("~/") {
+                        out.append(NSString(string: String(token)).expandingTildeInPath)
+                    }
+                }
+            } else if let list = value as? [Any] {
+                list.forEach(collect)
+            } else if let dict = value as? [String: Any] {
+                dict.values.forEach(collect)
+            }
+        }
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? [] where name.hasSuffix(".plist") {
+            guard let data = try? Data(contentsOf: directory.appendingPathComponent(name)),
+                  let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) else { continue }
+            collect(plist)
+        }
+        return out
+    }
+
+    public static func collect(home: URL) -> [String] {
+        let fm = FileManager.default
+        func children(_ rel: String) -> [URL] {
+            let dir = home.appendingPathComponent(rel)
+            return ((try? fm.contentsOfDirectory(atPath: dir.path)) ?? []).map { dir.appendingPathComponent($0) }
+        }
+        // 全局安装的包、PATH 上的命令、各 agent 的技能目录
+        var dirs = ["/opt/homebrew/lib/node_modules", "/usr/local/lib/node_modules", "/opt/homebrew/bin", "/usr/local/bin"]
+            .map { URL(fileURLWithPath: $0) }
+        dirs += [".bun/install/global/node_modules", ".bun/bin", ".local/bin", "Library/pnpm", ".yarn/bin", ".config/yarn/link",
+                 ".claude/skills", ".codex/skills", ".bnbot/skills"].map(home.appendingPathComponent)
+        dirs += children("Library/pnpm/global").map { $0.appendingPathComponent("node_modules") }
+        dirs += children(".nvm/versions/node").flatMap { [$0.appendingPathComponent("lib/node_modules"), $0.appendingPathComponent("bin")] }
+        return linkTargets(in: dirs) + launchAgentPaths(in: home.appendingPathComponent("Library/LaunchAgents"))
     }
 }

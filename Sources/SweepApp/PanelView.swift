@@ -66,7 +66,8 @@ struct PanelView: View {
                 Text("可用 \(Format.bytes(model.free))").font(.title3.weight(.semibold)).monospacedDigit()
                 Text("/ \(Format.bytes(model.total))").foregroundStyle(.secondary).monospacedDigit()
                 Spacer()
-                if let summary = model.summary, summary.deletableBytes > 0 {
+                // 差不到 1 GB 时这个数字和「可用」一样，显示出来只会添乱
+                if let summary = model.summary, summary.deletableBytes >= Int64(Format.gigabyte) {
                     Text("清理后约 \(Format.bytes(model.free + summary.deletableBytes))")
                         .foregroundStyle(.secondary).monospacedDigit()
                 }

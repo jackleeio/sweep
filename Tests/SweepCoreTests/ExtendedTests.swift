@@ -624,3 +624,101 @@ final class RuleDetailTests: XCTestCase {
         for rule in RuleID.allCases { XCTAssertFalse(rule.detail(Config()).isEmpty, "\(rule)") }
     }
 }
+
+final class InterruptedRunTests: XCTestCase {
+    /// 清理可能中途被终止。每删完一项，日志里就必须已经有它的记录，而不是等整轮结束才写。
+    func testLogLineIsWrittenBeforeTheNextItemIsTouched() {
+        let h = TempHome()
+        let env = h.env()
+        h.file("Projects/a/.next/blob.bin")
+        h.file("Projects/b/.next/blob.bin")
+        let items = ["a", "b"].map {
+            Candidate(rule: .buildCaches, url: h.path("Projects/\($0)/.next"), root: h.path("Projects"),
+                      bytes: 1, lastActivity: nil, verdict: .delete(reason: "测试"))
+        }
+        var loggedSoFar: [Int] = []
+        var secondStillThere = false
+        _ = Cleaner(env: env).run(items, dryRun: false) { item in
+            let log = (try? String(contentsOf: env.logFile, encoding: .utf8)) ?? ""
+            loggedSoFar.append(log.split(separator: "\n").filter { $0.contains("DELETE") }.count)
+            if item.path.hasSuffix("a/.next") { secondStillThere = h.exists("Projects/b/.next/blob.bin") }
+        }
+        XCTAssertEqual(loggedSoFar, [1, 2])
+        XCTAssertTrue(secondStillThere)
+    }
+}
+
+final class ExternalReferenceTests: XCTestCase {
+    private func idleProject(_ h: TempHome, _ rel: String) {
+        h.file("\(rel)/package.json", text: "{}")
+        h.file("\(rel)/node_modules/dep/index.js", bytes: 20_000)
+    }
+
+    private func scan(_ h: TempHome, references: [String]) -> [Candidate] {
+        var env = h.env()
+        env.externalReferences = { references }
+        return Scanner(config: Config(), env: env, pins: PinStore(file: env.pinsFile)).scan(rules: [.dependencies])
+    }
+
+    /// 全局 link 的命令、技能链接、定时任务会在项目「闲置」时照样用到它的依赖。
+    func testDependenciesOfProjectReferencedFromOutsideAreKept() {
+        let h = TempHome()
+        h.file("Projects/kit/.git/HEAD", text: "ref: refs/heads/main")
+        idleProject(h, "Projects/kit/cli")
+        idleProject(h, "Projects/kit/extension")
+        h.age("Projects/kit", daysAgo: 40)
+        let c = scan(h, references: [h.path("Projects/kit/cli").path])
+        XCTAssertEqual(c.count, 2)
+        XCTAssertEqual(c.deletable, [])
+        XCTAssertTrue(c.allSatisfy { $0.reason.contains("引用") })
+    }
+
+    func testReferenceIntoAnotherProjectDoesNotProtectThisOne() {
+        let h = TempHome()
+        idleProject(h, "Projects/kit")
+        idleProject(h, "Projects/kit-legacy")
+        h.age("Projects", daysAgo: 40)
+        let c = scan(h, references: [h.path("Projects/kit/dist/index.js").path])
+        XCTAssertEqual(c.deletable.map { $0.url.deletingLastPathComponent().lastPathComponent }, ["kit-legacy"])
+    }
+
+    func testReferenceComparisonIgnoresCase() {
+        let h = TempHome()
+        idleProject(h, "Projects/Kit")
+        h.age("Projects", daysAgo: 40)
+        XCTAssertEqual(scan(h, references: [h.path("projects/kit/cli").path]).deletable, [])
+    }
+
+    func testCollectsRealPathsOfSymlinksIncludingScopedPackages() throws {
+        let h = TempHome()
+        let fm = FileManager.default
+        h.dir("Projects/kit/cli")
+        h.dir("Projects/other")
+        h.dir("global/node_modules/@bnbot")
+        h.dir("global/node_modules/real-package")
+        try fm.createSymbolicLink(at: h.path("global/node_modules/@bnbot/cli"), withDestinationURL: h.path("Projects/kit/cli"))
+        try fm.createSymbolicLink(at: h.path("global/node_modules/other"), withDestinationURL: h.path("Projects/other"))
+        try fm.createSymbolicLink(at: h.path("global/node_modules/dangling"), withDestinationURL: h.path("Projects/gone"))
+        let found = ExternalReferences.linkTargets(in: [h.path("global/node_modules"), h.path("does/not/exist")])
+        XCTAssertEqual(Set(found), [h.path("Projects/kit/cli").path, h.path("Projects/other").path])
+    }
+
+    func testCollectsAbsolutePathsFromLaunchAgentPlists() throws {
+        let h = TempHome()
+        let plist: [String: Any] = [
+            "Label": "com.example.job",
+            "ProgramArguments": ["/usr/bin/node", h.path("Projects/svc/run.js").path, "--flag"],
+            "WorkingDirectory": h.path("Projects/svc").path,
+            "EnvironmentVariables": ["DATA": h.path("Projects/data").path],
+        ]
+        let data = try PropertyListSerialization.data(fromPropertyList: plist, format: .xml, options: 0)
+        try FileManager.default.createDirectory(at: h.path("Library/LaunchAgents"), withIntermediateDirectories: true)
+        try data.write(to: h.path("Library/LaunchAgents/com.example.job.plist"))
+        h.file("Library/LaunchAgents/broken.plist", text: "not a plist")
+        let found = ExternalReferences.launchAgentPaths(in: h.path("Library/LaunchAgents"))
+        XCTAssertTrue(found.contains(h.path("Projects/svc/run.js").path))
+        XCTAssertTrue(found.contains(h.path("Projects/svc").path))
+        XCTAssertTrue(found.contains(h.path("Projects/data").path))
+        XCTAssertFalse(found.contains("--flag"))
+    }
+}

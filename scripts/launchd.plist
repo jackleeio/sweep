@@ -10,7 +10,11 @@
         <string>run</string>
         <string>--scheduled</string>
     </array>
-    <!-- 每天 03:00；当时在睡眠的话，launchd 会在唤醒后补跑 -->
+    <!-- 每 10 分钟调用一次，由 sweep 自己判断要不要干活：
+         每天 03:00 之后做一次例行清理；可用空间低于警戒线时立即清理；其余时候直接退出。
+         不设 ProcessType=Background / LowPriorityIO：那样一次扫描会被系统压到十几分钟。 -->
+    <key>StartInterval</key>
+    <integer>600</integer>
     <key>StartCalendarInterval</key>
     <dict>
         <key>Hour</key>
@@ -18,10 +22,8 @@
         <key>Minute</key>
         <integer>0</integer>
     </dict>
-    <key>ProcessType</key>
-    <string>Background</string>
-    <key>LowPriorityIO</key>
-    <true/>
+    <key>Nice</key>
+    <integer>5</integer>
     <key>StandardOutPath</key>
     <string>__LOG_DIR__/launchd.log</string>
     <key>StandardErrorPath</key>

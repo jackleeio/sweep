@@ -20,6 +20,8 @@ public struct Env {
     public var processProbe: ProcessProbe
     /// 当前可用空间。做成闭包是因为清理前后要各读一次。
     public var freeBytes: () -> Int64
+    /// 项目目录之外引用到项目的路径：全局 link 的包、PATH 上的命令、技能链接、定时任务。
+    public var externalReferences: () -> [String] = { [] }
 
     public init(home: URL, now: Date, processProbe: ProcessProbe, freeBytes: @escaping () -> Int64 = { .max }) {
         self.home = home
