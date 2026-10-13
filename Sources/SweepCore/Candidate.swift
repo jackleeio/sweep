@@ -2,9 +2,11 @@ import Foundation
 
 public enum RuleID: String, Codable, CaseIterable {
     case buildCaches
+    case dependencies
     case agentTemp
     case conversations
     case packageCaches
+    case appCaches
     case artifacts
     case workCopies
 }

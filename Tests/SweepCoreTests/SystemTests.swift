@@ -84,7 +84,7 @@ final class ReportTextTests: XCTestCase {
 
     func testListsDeletableItemsUnderTheirRuleWithSizes() {
         let text = ReportText.scan([
-            item(.buildCaches, "/p/app/.next", 2 << 30, .delete(reason: "9 天没更新")),
+            item(.buildCaches, "/p/app/.next", 2_000_000_000, .delete(reason: "9 天没更新")),
             item(.conversations, "/c/a.jsonl", 3 << 20, .delete(reason: "5 天没更新")),
         ])
         XCTAssertTrue(text.contains("构建缓存"))
@@ -116,10 +116,53 @@ final class ReportTextTests: XCTestCase {
 
     func testEndsWithGrandTotalOfDeletableBytes() {
         let text = ReportText.scan([
-            item(.buildCaches, "/a", 1 << 30, .delete(reason: "x")),
-            item(.agentTemp, "/b", 1 << 30, .delete(reason: "x")),
+            item(.buildCaches, "/a", 1_000_000_000, .delete(reason: "x")),
+            item(.agentTemp, "/b", 1_000_000_000, .delete(reason: "x")),
             item(.workCopies, "/c", 50 << 30, .keep(reason: "仅展示，不自动清理")),
         ])
         XCTAssertTrue(text.contains("合计可清理 2 项，2.0 GB"))
+    }
+}
+
+final class ScanSummaryTests: XCTestCase {
+    private func item(_ rule: RuleID, _ bytes: Int64, _ verdict: Verdict) -> Candidate {
+        Candidate(rule: rule, url: URL(fileURLWithPath: "/x"), root: URL(fileURLWithPath: "/"), bytes: bytes,
+                  lastActivity: nil, verdict: verdict)
+    }
+
+    func testSummarisesCountsAndBytesPerRule() {
+        let summary = ScanSummary.make(from: [
+            item(.buildCaches, 100, .delete(reason: "x")),
+            item(.buildCaches, 50, .delete(reason: "x")),
+            item(.buildCaches, 7, .keep(reason: "最近在用")),
+            item(.workCopies, 900, .keep(reason: "仅展示")),
+        ], date: Date())
+        XCTAssertEqual(summary[.buildCaches], RuleSummary(deletableCount: 2, deletableBytes: 150, keptCount: 1, keptBytes: 7))
+        XCTAssertEqual(summary[.workCopies], RuleSummary(deletableCount: 0, deletableBytes: 0, keptCount: 1, keptBytes: 900))
+        XCTAssertNil(summary[.conversations])
+        XCTAssertEqual(summary.deletableBytes, 150)
+        XCTAssertEqual(summary.deletableCount, 2)
+    }
+
+    func testRoundTripsThroughFile() throws {
+        let h = TempHome()
+        let summary = ScanSummary.make(from: [item(.conversations, 42, .delete(reason: "x"))], date: h.now.wholeSeconds)
+        try summary.save(to: h.env().scanFile)
+        XCTAssertEqual(ScanSummary.load(from: h.env().scanFile), summary)
+    }
+
+    func testMissingFileLoadsAsNil() {
+        let h = TempHome()
+        XCTAssertNil(ScanSummary.load(from: h.env().scanFile))
+    }
+}
+
+final class FormatTests: XCTestCase {
+    /// 与「系统设置 › 储存空间」一致，按 1000 进制。
+    func testUsesDecimalUnitsLikeSystemSettings() {
+        XCTAssertEqual(Format.bytes(994_660_000_000), "995 GB")
+        XCTAssertEqual(Format.bytes(36_000_000_000), "36.0 GB")
+        XCTAssertEqual(Format.bytes(1_500_000), "1.5 MB")
+        XCTAssertEqual(Format.bytes(999), "999 B")
     }
 }

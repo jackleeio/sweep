@@ -7,6 +7,10 @@ private extension KeyedDecodingContainer {
     }
 }
 
+/// 用户配置。
+///
+/// 各规则要扫描的路径分两部分：内置列表写在代码里（`builtin…`），配置文件只保存用户额外
+/// 添加的（`extra…`）。这样升级时新增的内置路径不会被旧配置文件里的列表盖住。
 public struct Config: Codable, Equatable {
     public struct BuildCaches: Codable, Equatable {
         public var enabled = true
@@ -21,85 +25,141 @@ public struct Config: Codable, Equatable {
         }
     }
 
-    public struct AgentTemp: Codable, Equatable {
+    /// 闲置项目里可以重新安装的依赖目录：node_modules 和虚拟环境。
+    public struct Dependencies: Codable, Equatable {
         public var enabled = true
-        public var globs = ["~/.cache/bnbot-*", "~/Library/Caches/bnbot-*"]
+        /// 项目多少天没有改动才清它的依赖。
+        public var idleDays: Double = 14
         public init() {}
         public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
-            let d = AgentTemp()
+            let d = Dependencies()
             enabled = try c.value(.enabled, default: d.enabled)
-            globs = try c.value(.globs, default: d.globs)
+            idleDays = try c.value(.idleDays, default: d.idleDays)
+        }
+    }
+
+    public struct AgentTemp: Codable, Equatable {
+        public static let builtinGlobs = ["~/.cache/bnbot-*", "~/Library/Caches/bnbot-*"]
+        public var enabled = true
+        public var extraGlobs: [String] = []
+        public var globs: [String] { Self.builtinGlobs + extraGlobs }
+        public init() {}
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            enabled = try c.value(.enabled, default: true)
+            extraGlobs = try c.value(.extraGlobs, default: [])
         }
     }
 
     public struct Conversations: Codable, Equatable {
+        public static let builtinCodexRoots = ["~/.codex/sessions", "~/.codex/archived_sessions"]
+        public static let builtinClaudeRoots = ["~/.claude/projects"]
         public var enabled = true
-        public var codexRoots = ["~/.codex/sessions", "~/.codex/archived_sessions"]
-        public var claudeRoots = ["~/.claude/projects"]
+        public var extraCodexRoots: [String] = []
+        public var extraClaudeRoots: [String] = []
+        public var codexRoots: [String] { Self.builtinCodexRoots + extraCodexRoots }
+        public var claudeRoots: [String] { Self.builtinClaudeRoots + extraClaudeRoots }
         public init() {}
         public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
-            let d = Conversations()
-            enabled = try c.value(.enabled, default: d.enabled)
-            codexRoots = try c.value(.codexRoots, default: d.codexRoots)
-            claudeRoots = try c.value(.claudeRoots, default: d.claudeRoots)
+            enabled = try c.value(.enabled, default: true)
+            extraCodexRoots = try c.value(.extraCodexRoots, default: [])
+            extraClaudeRoots = try c.value(.extraClaudeRoots, default: [])
         }
     }
 
+    /// 包管理器和开发工具的下载缓存，删掉后会在需要时自动重新下载。
     public struct PackageCaches: Codable, Equatable {
-        public var enabled = true
-        /// 所列缓存合计超过这个体积才清理。
-        public var totalCapGB: Double = 20
         // 注意：~/.npm/_npx 里是 npx 装的包（可能带本地补丁），不属于缓存，不能列进来
-        public var paths = [
+        public static let builtinPaths = [
             "~/Library/Caches/Yarn",
             "~/.npm/_cacache",
             "~/.cache/uv",
             "~/Library/Caches/pip",
             "~/Library/pnpm/store",
+            "~/Library/Caches/pnpm",
+            "~/.bun/install/cache",
+            "~/.yarn/berry/cache",
+            "~/.docker/scout",
         ]
+        public var enabled = true
+        /// 所列缓存合计超过这个体积才清理。
+        public var totalCapGB: Double = 20
+        public var extraPaths: [String] = []
+        public var paths: [String] { Self.builtinPaths + extraPaths }
         public init() {}
         public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             let d = PackageCaches()
             enabled = try c.value(.enabled, default: d.enabled)
             totalCapGB = try c.value(.totalCapGB, default: d.totalCapGB)
-            paths = try c.value(.paths, default: d.paths)
+            extraPaths = try c.value(.extraPaths, default: [])
+        }
+    }
+
+    /// ~/Library/Caches 下其他应用的缓存。
+    public struct AppCaches: Codable, Equatable {
+        public static let builtinRoots = ["~/Library/Caches"]
+        /// 名字以这些开头的不碰：系统缓存，以及名义上是缓存、实际是装好的浏览器内核的目录（删了不会自动恢复）
+        public static let builtinSkipPrefixes = ["com.apple.", "ms-playwright", "Cypress"]
+        public var enabled = true
+        public var extraSkipPrefixes: [String] = []
+        public var roots: [String] { Self.builtinRoots }
+        public var skipPrefixes: [String] { Self.builtinSkipPrefixes + extraSkipPrefixes }
+        public init() {}
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            enabled = try c.value(.enabled, default: true)
+            extraSkipPrefixes = try c.value(.extraSkipPrefixes, default: [])
         }
     }
 
     public struct Artifacts: Codable, Equatable {
+        public static let builtinPaths = ["~/.codex/visualizations", "~/.codex/generated_images"]
         public var enabled = false
         public var idleDays: Double = 30
-        public var paths = ["~/.codex/visualizations", "~/.codex/generated_images"]
+        public var extraPaths: [String] = []
+        public var paths: [String] { Self.builtinPaths + extraPaths }
         public init() {}
         public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             let d = Artifacts()
             enabled = try c.value(.enabled, default: d.enabled)
             idleDays = try c.value(.idleDays, default: d.idleDays)
-            paths = try c.value(.paths, default: d.paths)
+            extraPaths = try c.value(.extraPaths, default: [])
         }
     }
 
     /// 只展示体积，永不自动删除。
     public struct WorkCopies: Codable, Equatable {
-        public var globs = ["~/Projects/*-worktrees/*", "~/Projects/*-build*"]
+        public static let builtinGlobs = ["~/Projects/*-worktrees/*", "~/Projects/*-build*"]
+        public var extraGlobs: [String] = []
+        public var globs: [String] { Self.builtinGlobs + extraGlobs }
         public init() {}
         public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
-            globs = try c.value(.globs, default: WorkCopies().globs)
+            extraGlobs = try c.value(.extraGlobs, default: [])
         }
     }
 
     /// 多少天没有更新即视为不再使用。
     public var idleDays: Double = 3
+    /// 可用空间低于这个值时立即清理，不等每日任务。0 表示关闭。
+    public var lowSpaceGB: Double = 100
+    /// 每日清理后可用空间仍低于这个值时，改用收紧的规则再清一遍。0 表示关闭。
+    public var targetFreeGB: Double = 300
+    /// 每日例行清理在几点之后进行（0–23）。
+    public var dailyHour = 3
+    /// 任何规则都不会碰的路径。
+    public var excludes: [String] = []
     public var projectRoots = ["~/Projects"]
     public var buildCaches = BuildCaches()
+    public var dependencies = Dependencies()
     public var agentTemp = AgentTemp()
     public var conversations = Conversations()
     public var packageCaches = PackageCaches()
+    public var appCaches = AppCaches()
     public var artifacts = Artifacts()
     public var workCopies = WorkCopies()
 
@@ -109,11 +169,17 @@ public struct Config: Codable, Equatable {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         let d = Config()
         idleDays = try c.value(.idleDays, default: d.idleDays)
+        lowSpaceGB = try c.value(.lowSpaceGB, default: d.lowSpaceGB)
+        targetFreeGB = try c.value(.targetFreeGB, default: d.targetFreeGB)
+        dailyHour = try c.value(.dailyHour, default: d.dailyHour)
+        excludes = try c.value(.excludes, default: d.excludes)
         projectRoots = try c.value(.projectRoots, default: d.projectRoots)
         buildCaches = try c.value(.buildCaches, default: d.buildCaches)
+        dependencies = try c.value(.dependencies, default: d.dependencies)
         agentTemp = try c.value(.agentTemp, default: d.agentTemp)
         conversations = try c.value(.conversations, default: d.conversations)
         packageCaches = try c.value(.packageCaches, default: d.packageCaches)
+        appCaches = try c.value(.appCaches, default: d.appCaches)
         artifacts = try c.value(.artifacts, default: d.artifacts)
         workCopies = try c.value(.workCopies, default: d.workCopies)
     }

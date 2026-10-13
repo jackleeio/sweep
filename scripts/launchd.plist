@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.jacklee.sweep.daily</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__CLI__</string>
+        <string>run</string>
+        <string>--scheduled</string>
+    </array>
+    <!-- 每天 03:00；当时在睡眠的话，launchd 会在唤醒后补跑 -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>3</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LowPriorityIO</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>__LOG_DIR__/launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>__LOG_DIR__/launchd.log</string>
+</dict>
+</plist>

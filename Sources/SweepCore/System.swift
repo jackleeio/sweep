@@ -13,6 +13,7 @@ public final class LiveProcessProbe: ProcessProbe {
         case .next: return ["next dev", "next build", "next start", "next-server", "turbopack"]
         case .cargoTarget: return ["cargo", "rustc", "tauri"]
         case .bunBuild: return ["bun build"]
+        case .dependencies: return ["node", "bun", "npm", "pnpm", "yarn", "deno", "vite", "tsx", "python", "uvicorn", "gunicorn", "celery"]
         }
     }
 
@@ -72,7 +73,8 @@ extension Env {
     /// 真实环境。设置 SWEEP_HOME 可以把所有路径指向另一个目录，用于演练。
     public static func live() -> Env {
         let override = ProcessInfo.processInfo.environment["SWEEP_HOME"].map { URL(fileURLWithPath: $0) }
-        return Env(home: override ?? FileManager.default.homeDirectoryForCurrentUser, now: Date(), processProbe: LiveProcessProbe())
+        let home = override ?? FileManager.default.homeDirectoryForCurrentUser
+        return Env(home: home, now: Date(), processProbe: LiveProcessProbe(), freeBytes: { Disk.usage(at: home).free })
     }
 }
 
@@ -90,9 +92,11 @@ extension RuleID {
     public var title: String {
         switch self {
         case .buildCaches: return "构建缓存"
+        case .dependencies: return "闲置项目的依赖"
         case .agentTemp: return "Agent 临时目录"
         case .conversations: return "Agent 对话"
-        case .packageCaches: return "包管理器缓存"
+        case .packageCaches: return "包与工具缓存"
+        case .appCaches: return "应用缓存"
         case .artifacts: return "Agent 产物"
         case .workCopies: return "工作副本"
         }
@@ -153,4 +157,50 @@ public enum Notifier {
         try? process.run()
         process.waitUntilExit()
     }
+}
+
+public struct RuleSummary: Codable, Equatable {
+    public var deletableCount: Int
+    public var deletableBytes: Int64
+    public var keptCount: Int
+    public var keptBytes: Int64
+}
+
+/// 一次扫描的汇总，界面用它立即显示上次结果。
+public struct ScanSummary: Codable, Equatable {
+    public var date: Date
+    var rules: [String: RuleSummary]
+
+    public subscript(rule: RuleID) -> RuleSummary? { rules[rule.rawValue] }
+    public var deletableBytes: Int64 { rules.values.reduce(0) { $0 + $1.deletableBytes } }
+    public var deletableCount: Int { rules.values.reduce(0) { $0 + $1.deletableCount } }
+
+    public static func make(from candidates: [Candidate], date: Date) -> ScanSummary {
+        var rules: [String: RuleSummary] = [:]
+        for candidate in candidates {
+            var entry = rules[candidate.rule.rawValue] ?? RuleSummary(deletableCount: 0, deletableBytes: 0, keptCount: 0, keptBytes: 0)
+            if candidate.isDelete {
+                entry.deletableCount += 1
+                entry.deletableBytes += candidate.bytes
+            } else {
+                entry.keptCount += 1
+                entry.keptBytes += candidate.bytes
+            }
+            rules[candidate.rule.rawValue] = entry
+        }
+        return ScanSummary(date: date, rules: rules)
+    }
+
+    public static func load(from url: URL) -> ScanSummary? {
+        (try? JSONFiles.read(ScanSummary.self, from: url)) ?? nil
+    }
+
+    public func save(to url: URL) throws {
+        try JSONFiles.write(self, to: url)
+    }
+}
+
+extension Env {
+    public var scanFile: URL { supportDir.appendingPathComponent("last-scan.json") }
+    public var previewFile: URL { supportDir.appendingPathComponent("preview.txt") }
 }

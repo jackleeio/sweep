@@ -148,7 +148,7 @@ final class BuildCacheRuleTests: XCTestCase {
 
     private var tinyCap: Config {
         var c = Config()
-        c.buildCaches.sizeCapGB = 0.00001 // 约 10KB
+        c.buildCaches.sizeCapGB = 0.00001 // 10KB
         return c
     }
 
@@ -339,7 +339,7 @@ final class PackageCacheRuleTests: XCTestCase {
         h.file("Library/Caches/Yarn/v6/a.tgz", bytes: 50_000)
         h.file(".npm/_cacache/content/b", bytes: 50_000)
         var config = Config()
-        config.packageCaches.totalCapGB = 0.00005 // 约 50KB，两项合计超过
+        config.packageCaches.totalCapGB = 0.00005 // 50KB，两项合计超过
         XCTAssertEqual(scan(h, .packageCaches, config: config).deletable.count, 2)
     }
 

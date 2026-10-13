@@ -5,37 +5,48 @@ public struct Scanner {
     let config: Config
     let env: Env
     let pins: PinStore
+    /// 收紧模式：空间不足时使用。缓存类规则从「3 天没更新」收紧到「1 小时没更新」，
+    /// 包缓存不看上限，闲置依赖的门槛降到 3 天。对话规则不受影响。
+    let tight: Bool
 
-    public init(config: Config, env: Env, pins: PinStore) {
+    public init(config: Config, env: Env, pins: PinStore, tight: Bool = false) {
         self.config = config
         self.env = env
         self.pins = pins
+        self.tight = tight
     }
 
     public func scan(rules: Set<RuleID> = Set(RuleID.allCases)) -> [Candidate] {
+        let active = RuleID.allCases.filter { rules.contains($0) && isEnabled($0) }
+        // 构建缓存和依赖目录都在项目目录里，共用一次遍历
+        let needsProjects = active.contains(.buildCaches) || active.contains(.dependencies)
+        let projects = needsProjects ? walkProjects() : ProjectMatches()
         // 各规则扫描的目录互不重叠，并行跑；结果仍按规则顺序排列
-        RuleID.allCases.filter { rules.contains($0) && isEnabled($0) }
-            .parallelMap(candidates(for:))
-            .flatMap { $0 }
+        let found = active.parallelMap { candidates(for: $0, projects: projects) }.flatMap { $0 }
+        return applyExcludes(found)
     }
 
     private func isEnabled(_ rule: RuleID) -> Bool {
         switch rule {
         case .buildCaches: return config.buildCaches.enabled
+        case .dependencies: return config.dependencies.enabled
         case .agentTemp: return config.agentTemp.enabled
         case .conversations: return config.conversations.enabled
         case .packageCaches: return config.packageCaches.enabled
+        case .appCaches: return config.appCaches.enabled
         case .artifacts: return config.artifacts.enabled
         case .workCopies: return true
         }
     }
 
-    private func candidates(for rule: RuleID) -> [Candidate] {
+    private func candidates(for rule: RuleID, projects: ProjectMatches) -> [Candidate] {
         switch rule {
-        case .buildCaches: return buildCaches()
+        case .buildCaches: return buildCaches(projects.caches)
+        case .dependencies: return dependencies(projects.dependencies)
         case .agentTemp: return agentTemp()
         case .conversations: return conversations()
         case .packageCaches: return packageCaches()
+        case .appCaches: return appCaches()
         case .artifacts: return artifacts()
         case .workCopies: return workCopies()
         }
@@ -43,15 +54,67 @@ public struct Scanner {
 
     // MARK: - 通用
 
+    /// 缓存类规则的闲置门槛（天）。
+    private var cacheIdleDays: Double { tight ? 1.0 / 24 : config.idleDays }
+
     private func idleDays(_ date: Date) -> Double { env.now.timeIntervalSince(date) / 86400 }
 
-    private func idleReason(_ days: Double) -> String { "\(Int(days)) 天没更新" }
+    private func idleReason(_ days: Double) -> String {
+        days < 1 ? "\(Int(days * 24)) 小时没更新" : "\(Int(days)) 天没更新"
+    }
 
     private func byPath(_ list: [Candidate]) -> [Candidate] { list.sorted { $0.url.path < $1.url.path } }
 
-    // MARK: - 构建缓存
+    private func idleVerdict(_ m: Measurement, threshold: Double) -> Verdict {
+        if m.unreadable { return .keep(reason: "无法完整读取") }
+        guard let latest = m.latest else { return .keep(reason: "无法读取") }
+        let idle = idleDays(latest)
+        return idle >= threshold ? .delete(reason: idleReason(idle)) : .keep(reason: "最近有更新")
+    }
 
-    private static let skippedDirectories: Set<String> = ["node_modules", ".git", "Pods", ".venv", "venv", "__pycache__"]
+    /// 去掉与排除路径有重叠的项：在排除路径内部的，以及把排除路径包在里面的。
+    private func applyExcludes(_ list: [Candidate]) -> [Candidate] {
+        let excluded = config.excludes.map { Self.plainPath(env.expand($0)) }
+        guard !excluded.isEmpty else { return list }
+        return list.filter { candidate in
+            !([candidate.url] + candidate.extraURLs).map(Self.plainPath).contains { path in
+                excluded.contains { $0 == path || path.hasPrefix($0 + "/") || $0.hasPrefix(path + "/") }
+            }
+        }
+    }
+
+    /// 去掉结尾斜杠的路径。不用 standardizedFileURL：它对存在和不存在的路径处理不一致
+    /// （存在时会去掉 /private 前缀），两边比较会对不上。
+    private static func plainPath(_ url: URL) -> String {
+        let path = url.path
+        return path.count > 1 && path.hasSuffix("/") ? String(path.dropLast()) : path
+    }
+
+    // MARK: - 项目目录遍历
+
+    private struct CacheMatch {
+        let url: URL
+        let kind: CacheKind
+        let projectDir: URL
+        let root: URL
+    }
+
+    private struct DependencyMatch {
+        let url: URL
+        /// 所属项目：最近的 git 仓库，没有仓库时取根目录下的顶层目录。
+        let project: URL
+        let root: URL
+        /// 项目最近一次改动的时间（依赖目录内部的文件不算）。
+        let activity: Double
+    }
+
+    private struct ProjectMatches {
+        var caches: [CacheMatch] = []
+        var dependencies: [DependencyMatch] = []
+    }
+
+    private static let skippedDirectories: Set<String> = ["Pods", "__pycache__", ".venv", "venv"]
+    private static let rebuildManifests: Set<String> = ["uv.lock", "poetry.lock", "Pipfile.lock", "pyproject.toml"]
     private static let maxDepth = 8
 
     static func isNextCacheName(_ name: String) -> Bool {
@@ -68,26 +131,123 @@ public struct Scanner {
         return parts.count == 2 && parts.allSatisfy { !$0.isEmpty && $0.allSatisfy(\.isHexDigit) }
     }
 
-    private struct CacheMatch {
-        let url: URL
-        let kind: CacheKind
-        let projectDir: URL
-        let root: URL
+    private func walkProjects() -> ProjectMatches {
+        var all = ProjectMatches()
+        for root in config.projectRoots.map(env.expand) where FileKind.of(root) == .directory {
+            let names = (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []
+            // 根目录下的各个项目并行遍历
+            let parts = names.parallelMap { name -> ProjectMatches in
+                var found = ProjectMatches()
+                let path = root.path + "/" + name
+                guard let info = FileKind.info(path) else { return found }
+                if info.kind == .file, Self.isBunBuildName(name) {
+                    found.caches.append(CacheMatch(url: URL(fileURLWithPath: path), kind: .bunBuild, projectDir: root, root: root))
+                } else if info.kind == .directory, name != "node_modules", !Self.skippedDirectories.contains(name) {
+                    _ = walk(path, depth: 1, root: root, into: &found)
+                }
+                return found
+            }
+            for part in parts {
+                all.caches += part.caches
+                all.dependencies += part.dependencies
+            }
+        }
+        return all
     }
 
-    private func buildCaches() -> [Candidate] {
-        let fm = FileManager.default
-        var matches: [CacheMatch] = []
-        for root in config.projectRoots.map(env.expand) where FileKind.of(root) == .directory {
-            // 根目录下的各个项目并行遍历
-            let names = (try? fm.contentsOfDirectory(atPath: root.path)) ?? []
-            matches += names.parallelMap { name -> [CacheMatch] in
-                var found: [CacheMatch] = []
-                visit(name, in: root, depth: 1, root: root, into: &found)
-                return found
-            }.flatMap { $0 }
+    /// 遍历一个目录，把命中的缓存和依赖目录记入 out。
+    /// 返回该目录下项目文件的最新修改时间，以及还没归到某个项目名下的依赖目录。
+    /// 这里用字符串路径而不是 URL：要访问的条目很多，URL 的拼接开销明显。
+    private func walk(_ dir: String, depth: Int, root: URL, into out: inout ProjectMatches) -> (latest: Double, pending: [String]) {
+        var latest = FileKind.info(dir)?.mtime ?? 0
+        var pending: [String] = []
+        guard depth <= Self.maxDepth, let names = try? FileManager.default.contentsOfDirectory(atPath: dir) else {
+            return (latest, pending)
+        }
+        let siblings = Set(names)
+        let dirURL = URL(fileURLWithPath: dir)
+
+        for name in names where name != ".DS_Store" {
+            let path = dir + "/" + name
+            guard let info = FileKind.info(path) else { continue }
+            guard info.kind == .directory else {
+                if info.kind == .file, Self.isBunBuildName(name) {
+                    out.caches.append(CacheMatch(url: URL(fileURLWithPath: path), kind: .bunBuild, projectDir: dirURL, root: root))
+                } else {
+                    latest = max(latest, info.mtime)
+                }
+                continue
+            }
+
+            if Self.isNextCacheName(name) {
+                if siblings.contains("package.json") {
+                    out.caches.append(CacheMatch(url: URL(fileURLWithPath: path), kind: .next, projectDir: dirURL, root: root))
+                }
+            } else if name == "target", FileKind.info(path + "/CACHEDIR.TAG") != nil {
+                // cargo 的产物目录：只清 Tauri 项目里的，其余的跳过不深入
+                if dirURL.lastPathComponent == "src-tauri" {
+                    out.caches.append(CacheMatch(url: URL(fileURLWithPath: path), kind: .cargoTarget,
+                                                 projectDir: dirURL.deletingLastPathComponent(), root: root))
+                }
+            } else if name == "node_modules" {
+                if siblings.contains("package.json") {
+                    pending.append(path)
+                    // 最近装过依赖也算项目有动静，否则刚 install 完就会被清掉
+                    latest = max(latest, shallowLatest(path))
+                }
+            } else if name == ".venv" || name == "venv", FileKind.info(path + "/pyvenv.cfg") != nil {
+                // 只有能照原样重建的虚拟环境才清
+                if !siblings.isDisjoint(with: Self.rebuildManifests) || siblings.contains(where: { $0.hasPrefix("requirements") && $0.hasSuffix(".txt") }) {
+                    pending.append(path)
+                    latest = max(latest, virtualEnvLatest(path))
+                }
+            } else if name == ".git" {
+                latest = max(latest, gitLatest(path))
+            } else if !Self.skippedDirectories.contains(name) {
+                let inner = walk(path, depth: depth + 1, root: root, into: &out)
+                latest = max(latest, inner.latest)
+                pending += inner.pending
+            }
         }
 
+        // 项目边界：git 仓库或工作树（.git 是目录或文件），或根目录下的顶层目录。
+        // 同一仓库里的包共用仓库的活跃时间，避免只清掉 monorepo 的一部分。
+        if siblings.contains(".git") || depth == 1 {
+            for path in pending {
+                out.dependencies.append(DependencyMatch(url: URL(fileURLWithPath: path), project: dirURL, root: root, activity: latest))
+            }
+            pending = []
+        }
+        return (latest, pending)
+    }
+
+    /// 目录自身及其直接子项的最新修改时间。
+    private func shallowLatest(_ dir: String) -> Double {
+        var latest = FileKind.info(dir)?.mtime ?? 0
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [] {
+            latest = max(latest, FileKind.info(dir + "/" + name)?.mtime ?? 0)
+        }
+        return latest
+    }
+
+    private func virtualEnvLatest(_ dir: String) -> Double {
+        var latest = FileKind.info(dir)?.mtime ?? 0
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: dir + "/lib")) ?? [] {
+            latest = max(latest, FileKind.info(dir + "/lib/" + name + "/site-packages")?.mtime ?? 0)
+        }
+        return latest
+    }
+
+    /// 提交、暂存、切换分支、拉取都会更新这几个文件。
+    private func gitLatest(_ gitDir: String) -> Double {
+        ["", "/index", "/HEAD", "/logs/HEAD", "/FETCH_HEAD", "/ORIG_HEAD"]
+            .compactMap { FileKind.info(gitDir + $0)?.mtime }
+            .max() ?? 0
+    }
+
+    // MARK: - 构建缓存
+
+    private func buildCaches(_ matches: [CacheMatch]) -> [Candidate] {
         // 测量体积和查 git 是最慢的部分，并行做；进程占用检测有内部状态，留到后面串行做
         let judged = matches.parallelMap { match -> (CacheMatch, Measurement, Verdict, Git.Tracking?) in
             let m = Measure.measure(match.url)
@@ -115,45 +275,51 @@ public struct Scanner {
         })
     }
 
-    private func walk(_ dir: URL, depth: Int, root: URL, into out: inout [CacheMatch]) {
-        guard depth <= Self.maxDepth, let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return }
-        for name in names { visit(name, in: dir, depth: depth, root: root, into: &out) }
-    }
-
-    private func visit(_ name: String, in dir: URL, depth: Int, root: URL, into out: inout [CacheMatch]) {
-        let fm = FileManager.default
-        let url = dir.appendingPathComponent(name)
-        switch FileKind.of(url) {
-        case .file:
-            if Self.isBunBuildName(name) {
-                out.append(CacheMatch(url: url, kind: .bunBuild, projectDir: dir, root: root))
-            }
-        case .directory:
-            if Self.isNextCacheName(name) {
-                if fm.fileExists(atPath: dir.appendingPathComponent("package.json").path) {
-                    out.append(CacheMatch(url: url, kind: .next, projectDir: dir, root: root))
-                }
-            } else if name == "target", fm.fileExists(atPath: url.appendingPathComponent("CACHEDIR.TAG").path) {
-                // cargo 的产物目录：只清 Tauri 项目里的，其余的跳过不深入
-                if dir.lastPathComponent == "src-tauri" {
-                    out.append(CacheMatch(url: url, kind: .cargoTarget, projectDir: dir.deletingLastPathComponent(), root: root))
-                }
-            } else if !Self.skippedDirectories.contains(name) {
-                walk(url, depth: depth + 1, root: root, into: &out)
-            }
-        default:
-            return
-        }
-    }
-
     private func cacheVerdict(_ m: Measurement) -> Verdict {
+        if m.unreadable { return .keep(reason: "无法完整读取") }
         guard let latest = m.latest else { return .keep(reason: "无法读取") }
         let idle = idleDays(latest)
-        if idle >= config.idleDays { return .delete(reason: idleReason(idle)) }
-        if m.bytes > Int64(config.buildCaches.sizeCapGB * 1_073_741_824) {
+        if idle >= cacheIdleDays { return .delete(reason: idleReason(idle)) }
+        if m.bytes > Int64(config.buildCaches.sizeCapGB * Format.gigabyte) {
             return .delete(reason: "超过 \(Format.gb(config.buildCaches.sizeCapGB)) 上限")
         }
         return .keep(reason: "最近在用")
+    }
+
+    // MARK: - 闲置项目的依赖
+
+    private func dependencies(_ matches: [DependencyMatch]) -> [Candidate] {
+        let threshold = tight ? config.idleDays : config.dependencies.idleDays
+
+        let judged = matches.parallelMap { match -> (DependencyMatch, Measurement, Verdict, Git.Tracking?) in
+            let m = Measure.measure(match.url)
+            let idle = (env.now.timeIntervalSince1970 - match.activity) / 86400
+            let verdict: Verdict
+            if m.unreadable {
+                verdict = .keep(reason: "无法完整读取")
+            } else if idle >= threshold {
+                verdict = .delete(reason: "项目 \(Int(idle)) 天没动，依赖可重新安装")
+            } else {
+                verdict = .keep(reason: "项目最近有改动")
+            }
+            if case .delete = verdict { return (match, m, verdict, Git.tracking(of: match.url)) }
+            return (match, m, verdict, nil)
+        }
+
+        return byPath(judged.map { match, m, preliminary, tracking in
+            var verdict = preliminary
+            if case .delete = verdict {
+                if case .untracked? = tracking {
+                    if env.processProbe.isInUse(projectDir: match.project, kind: .dependencies) {
+                        verdict = .keep(reason: "项目里有进程在运行")
+                    }
+                } else {
+                    verdict = .keep(reason: "含 git 跟踪的文件")
+                }
+            }
+            return Candidate(rule: .dependencies, url: match.url, root: match.root, bytes: m.bytes,
+                             lastActivity: Date(timeIntervalSince1970: match.activity), verdict: verdict)
+        })
     }
 
     // MARK: - Agent 临时构建目录
@@ -162,15 +328,9 @@ public struct Scanner {
         let out = config.agentTemp.globs.flatMap { Glob.expand($0, env: env) }.parallelMap { match -> Candidate in
             let m = Measure.measure(match.url)
             return Candidate(rule: .agentTemp, url: match.url, root: match.root, bytes: m.bytes,
-                             lastActivity: m.latest, verdict: idleVerdict(m.latest, threshold: config.idleDays))
+                             lastActivity: m.latest, verdict: idleVerdict(m, threshold: cacheIdleDays))
         }
         return byPath(out)
-    }
-
-    private func idleVerdict(_ latest: Date?, threshold: Double) -> Verdict {
-        guard let latest else { return .keep(reason: "无法读取") }
-        let idle = idleDays(latest)
-        return idle >= threshold ? .delete(reason: idleReason(idle)) : .keep(reason: "最近有更新")
     }
 
     // MARK: - Agent 对话
@@ -230,7 +390,8 @@ public struct Scanner {
                 let file = files[id]
                 let dir = dirs[id]
                 let parts = [file, dir].compactMap { $0 }.map(Measure.measure)
-                let latest = parts.compactMap(\.latest).max()
+                // 有读不了的部分时，按「刚更新过」处理，不删
+                let latest = parts.contains(where: \.unreadable) ? env.now : parts.compactMap(\.latest).max()
                 let primary = file ?? dir!
                 return Candidate(rule: .conversations, url: primary, extraURLs: file != nil && dir != nil ? [dir!] : [],
                                  root: root, bytes: parts.reduce(0) { $0 + $1.bytes }, lastActivity: latest,
@@ -240,6 +401,7 @@ public struct Scanner {
         return out
     }
 
+    /// 对话规则不受收紧模式影响：空间再紧张也不加快删除对话。
     private func conversationVerdict(file: URL, sessionID: String?, latest: Date?, pins: [Pin]?) -> Verdict {
         guard let latest else { return .keep(reason: "无法读取") }
         let idle = idleDays(latest)
@@ -251,22 +413,52 @@ public struct Scanner {
         return .delete(reason: idleReason(idle))
     }
 
-    // MARK: - 包管理器缓存
+    // MARK: - 包与工具缓存
 
     private func packageCaches() -> [Candidate] {
         let measured = config.packageCaches.paths.map(env.expand)
             .filter { FileKind.of($0) == .directory }
             .parallelMap { ($0, Measure.measure($0)) }
         let total = measured.reduce(Int64(0)) { $0 + $1.1.bytes }
-        let cap = Int64(config.packageCaches.totalCapGB * 1_073_741_824)
+        let cap = tight ? 0 : Int64(config.packageCaches.totalCapGB * Format.gigabyte)
         let capText = Format.gb(config.packageCaches.totalCapGB)
-        let verdict: Verdict = total > cap
-            ? .delete(reason: "包缓存合计 \(Format.bytes(total))，超过 \(capText) 上限")
-            : .keep(reason: "包缓存合计 \(Format.bytes(total))，未到 \(capText) 上限")
+
+        let verdict: Verdict
+        if total <= cap {
+            verdict = .keep(reason: "包缓存合计 \(Format.bytes(total))，未到 \(capText) 上限")
+        } else if tight {
+            verdict = .delete(reason: "空间不足，清空包缓存")
+        } else {
+            verdict = .delete(reason: "包缓存合计 \(Format.bytes(total))，超过 \(capText) 上限")
+        }
         return byPath(measured.map { url, m in
             // 根取 home 并要求至少两层深，防止配置写错时删到 ~/Library 这类目录
-            Candidate(rule: .packageCaches, url: url, root: env.home, minDepth: 2, bytes: m.bytes,
-                      lastActivity: m.latest, verdict: verdict)
+            Candidate(rule: .packageCaches, url: url, root: env.home, minDepth: 2, bytes: m.bytes, lastActivity: m.latest,
+                      verdict: m.unreadable ? .keep(reason: "无法完整读取") : verdict)
+        })
+    }
+
+    // MARK: - 应用缓存
+
+    private func appCaches() -> [Candidate] {
+        // 已经归其他规则管的目录不重复列出
+        let owned = Set(config.packageCaches.paths.map { Self.plainPath(env.expand($0)) }
+            + config.agentTemp.globs.flatMap { Glob.expand($0, env: env) }.map { Self.plainPath($0.url) })
+
+        var entries: [(url: URL, root: URL)] = []
+        for root in config.appCaches.roots.map(env.expand) {
+            for name in (try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? [] {
+                guard !name.hasPrefix("."), !config.appCaches.skipPrefixes.contains(where: name.hasPrefix) else { continue }
+                let url = root.appendingPathComponent(name)
+                guard let kind = FileKind.of(url), kind == .directory || kind == .file,
+                      !owned.contains(Self.plainPath(url)) else { continue }
+                entries.append((url, root))
+            }
+        }
+        return byPath(entries.parallelMap { entry in
+            let m = Measure.measure(entry.url)
+            return Candidate(rule: .appCaches, url: entry.url, root: entry.root, bytes: m.bytes,
+                             lastActivity: m.latest, verdict: idleVerdict(m, threshold: cacheIdleDays))
         })
     }
 
@@ -279,7 +471,7 @@ public struct Scanner {
             for case let url as URL in walker where FileKind.of(url) == .file {
                 let m = Measure.measure(url)
                 out.append(Candidate(rule: .artifacts, url: url, root: root, bytes: m.bytes, lastActivity: m.latest,
-                                     verdict: idleVerdict(m.latest, threshold: config.artifacts.idleDays)))
+                                     verdict: idleVerdict(m, threshold: config.artifacts.idleDays)))
             }
         }
         return byPath(out)

@@ -6,6 +6,8 @@ public struct Measurement: Equatable {
     public var bytes: Int64
     /// 树内最新的修改时间，含目录自身。
     public var latest: Date?
+    /// 树里有读不了的部分。此时体积和时间都不完整，调用方不应据此删除。
+    public var unreadable = false
 }
 
 public enum Measure {
@@ -25,6 +27,7 @@ public enum Measure {
         var bytes: Int64 = 0
         var latest: Double = -1
         var shared: [Inode: Links] = [:]
+        var unreadable = false
 
         guard let cpath = strdup(url.path) else { return Measurement(bytes: 0, latest: nil) }
         defer { free(cpath) }
@@ -48,12 +51,14 @@ public enum Measure {
                 }
                 let t = Double(st.pointee.st_mtimespec.tv_sec) + Double(st.pointee.st_mtimespec.tv_nsec) / 1e9
                 if t > latest { latest = t }
+            case FTS_DNR, FTS_ERR, FTS_NS:
+                unreadable = true
             default:
                 continue
             }
         }
 
         for links in shared.values where links.seen >= links.total { bytes += links.bytes }
-        return Measurement(bytes: bytes, latest: latest < 0 ? nil : Date(timeIntervalSince1970: latest))
+        return Measurement(bytes: bytes, latest: latest < 0 ? nil : Date(timeIntervalSince1970: latest), unreadable: unreadable)
     }
 }

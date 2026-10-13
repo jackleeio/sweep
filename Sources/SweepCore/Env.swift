@@ -4,6 +4,8 @@ public enum CacheKind: Equatable {
     case next
     case cargoTarget
     case bunBuild
+    /// 项目的依赖目录（node_modules、虚拟环境）
+    case dependencies
 }
 
 /// 判断某个项目目录下的构建缓存是否正被运行中的进程使用。
@@ -16,11 +18,14 @@ public struct Env {
     public var home: URL
     public var now: Date
     public var processProbe: ProcessProbe
+    /// 当前可用空间。做成闭包是因为清理前后要各读一次。
+    public var freeBytes: () -> Int64
 
-    public init(home: URL, now: Date, processProbe: ProcessProbe) {
+    public init(home: URL, now: Date, processProbe: ProcessProbe, freeBytes: @escaping () -> Int64 = { .max }) {
         self.home = home
         self.now = now
         self.processProbe = processProbe
+        self.freeBytes = freeBytes
     }
 
     public var supportDir: URL { home.appendingPathComponent("Library/Application Support/Sweep") }

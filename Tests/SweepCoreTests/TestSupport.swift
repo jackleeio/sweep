@@ -52,8 +52,8 @@ final class TempHome {
 
     func exists(_ rel: String) -> Bool { fm.fileExists(atPath: path(rel).path) }
 
-    func env(inUse: @escaping (URL, CacheKind) -> Bool = { _, _ in false }) -> Env {
-        Env(home: url, now: now, processProbe: FakeProbe(inUse))
+    func env(inUse: @escaping (URL, CacheKind) -> Bool = { _, _ in false }, free: @escaping () -> Int64 = { .max }) -> Env {
+        Env(home: url, now: now, processProbe: FakeProbe(inUse), freeBytes: free)
     }
 
     func git(_ args: String..., in rel: String) {

@@ -1,12 +1,15 @@
 import Foundation
 
 public enum Format {
+    /// 与「系统设置 › 储存空间」和访达一致，按 1000 进制。
+    public static let gigabyte: Double = 1_000_000_000
+
     public static func bytes(_ n: Int64) -> String {
         let units = ["B", "KB", "MB", "GB", "TB"]
         var value = Double(n)
         var i = 0
-        while value >= 1024, i < units.count - 1 {
-            value /= 1024
+        while value >= 1000, i < units.count - 1 {
+            value /= 1000
             i += 1
         }
         return i == 0 ? "\(n) B" : String(format: value >= 100 ? "%.0f %@" : "%.1f %@", value, units[i])
@@ -95,14 +98,19 @@ enum FileKind {
     case other
 
     /// 不跟随符号链接；路径不存在返回 nil。
-    static func of(_ url: URL) -> FileKind? {
+    static func of(_ url: URL) -> FileKind? { info(url.path)?.kind }
+
+    /// 一次 lstat 同时取类型和修改时间（epoch 秒）。
+    static func info(_ path: String) -> (kind: FileKind, mtime: Double)? {
         var st = stat()
-        guard lstat(url.path, &st) == 0 else { return nil }
+        guard lstat(path, &st) == 0 else { return nil }
+        let kind: FileKind
         switch st.st_mode & S_IFMT {
-        case S_IFREG: return .file
-        case S_IFDIR: return .directory
-        case S_IFLNK: return .symlink
-        default: return .other
+        case S_IFREG: kind = .file
+        case S_IFDIR: kind = .directory
+        case S_IFLNK: kind = .symlink
+        default: kind = .other
         }
+        return (kind, Double(st.st_mtimespec.tv_sec) + Double(st.st_mtimespec.tv_nsec) / 1e9)
     }
 }

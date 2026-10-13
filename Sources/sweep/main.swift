@@ -31,7 +31,8 @@ func stamp(_ date: Date) -> String {
 
 func scan() throws {
     let config = try Config.load(from: env.configFile)
-    let scanner = Scanner(config: config, env: env, pins: pins)
+    let tight = args.contains("--tight")
+    let scanner = Scanner(config: config, env: env, pins: pins, tight: tight)
     if args.contains("--timing") {
         for rule in RuleID.allCases {
             let start = Date()
@@ -40,7 +41,13 @@ func scan() throws {
         }
         return
     }
-    print(ReportText.scan(scanner.scan(), limitPerRule: args.contains("--all") ? nil : 15))
+    let candidates = scanner.scan()
+    // 存一份摘要和完整清单，菜单栏 app 会直接读取（收紧模式的预览不存，以免误导）
+    if !tight {
+        try? ScanSummary.make(from: candidates, date: env.now).save(to: env.scanFile)
+        try? ReportText.scan(candidates, limitPerRule: nil).write(to: env.previewFile, atomically: true, encoding: .utf8)
+    }
+    print(ReportText.scan(candidates, limitPerRule: args.contains("--all") ? nil : 15))
 }
 
 func run() throws {
@@ -124,7 +131,7 @@ func listPins() throws {
 }
 
 func status() throws {
-    let state = State.load(from: env.stateFile)
+    let state = SweepState.load(from: env.stateFile)
     let disk = Disk.usage(at: env.home)
     print("自动清理：\(state.armed ? "已开启" : "未开启（等待首次确认）")")
     if let last = state.lastRun {
@@ -139,7 +146,7 @@ func status() throws {
 }
 
 func setArmed(_ armed: Bool) throws {
-    var state = State.load(from: env.stateFile)
+    var state = SweepState.load(from: env.stateFile)
     state.armed = armed
     try state.save(to: env.stateFile)
     print(armed ? "已开启自动清理。" : "已关闭自动清理，定时任务将只扫描不删除。")

@@ -164,7 +164,7 @@ final class RunnerTests: XCTestCase {
     }
 
     private func arm(_ h: TempHome) throws {
-        var s = State()
+        var s = SweepState()
         s.armed = true
         try s.save(to: h.env().stateFile)
     }
@@ -196,7 +196,7 @@ final class RunnerTests: XCTestCase {
     func testManualRunDoesNotArmScheduledRuns() throws {
         let h = stale()
         _ = try Runner(env: h.env()).run(mode: .manual)
-        XCTAssertFalse(State.load(from: h.env().stateFile).armed)
+        XCTAssertFalse(SweepState.load(from: h.env().stateFile).armed)
     }
 
     func testDryRunDeletesNothingAndLeavesStateUntouched() throws {
@@ -204,14 +204,14 @@ final class RunnerTests: XCTestCase {
         let outcome = try Runner(env: h.env()).run(mode: .manual, dryRun: true)
         XCTAssertTrue(h.exists(rollout))
         XCTAssertEqual(outcome.report?.deleted.count, 2)
-        XCTAssertNil(State.load(from: h.env().stateFile).lastRun)
+        XCTAssertNil(SweepState.load(from: h.env().stateFile).lastRun)
     }
 
     func testRunRecordsStateAndAccumulatesTotal() throws {
         let h = stale()
         try arm(h)
         let first = try Runner(env: h.env()).run(mode: .scheduled)
-        var state = State.load(from: h.env().stateFile)
+        var state = SweepState.load(from: h.env().stateFile)
         XCTAssertNotNil(state.lastRun)
         XCTAssertEqual(state.lastFreedBytes, first.report?.freedBytes)
         XCTAssertEqual(state.lastDeletedCount, 2)
@@ -219,7 +219,7 @@ final class RunnerTests: XCTestCase {
         h.file("Projects/app/.next/blob.bin", bytes: 60_000)
         h.age("Projects/app/.next", daysAgo: 9)
         let second = try Runner(env: h.env()).run(mode: .scheduled)
-        state = State.load(from: h.env().stateFile)
+        state = SweepState.load(from: h.env().stateFile)
         XCTAssertEqual(state.totalFreedBytes, first.report!.freedBytes + second.report!.freedBytes)
         XCTAssertTrue(state.armed)
     }
