@@ -17,6 +17,20 @@ public enum Format {
     }
 }
 
+extension Array {
+    /// 并行执行 transform，结果顺序与输入一致。用于磁盘遍历这类各项互不相干的慢操作。
+    func parallelMap<R>(_ transform: (Element) -> R) -> [R] {
+        guard count > 1 else { return map(transform) }
+        return [R](unsafeUninitializedCapacity: count) { buffer, initialized in
+            let base = buffer.baseAddress!
+            DispatchQueue.concurrentPerform(iterations: count) { i in
+                (base + i).initialize(to: transform(self[i]))
+            }
+            initialized = count
+        }
+    }
+}
+
 enum Git {
     enum Tracking {
         case tracked

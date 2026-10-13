@@ -86,7 +86,9 @@ public struct Cleaner {
     }
 
     private func logLine(_ action: String, _ candidate: Candidate, _ detail: String) -> String {
-        let stamp = ISO8601DateFormatter().string(from: env.now)
+        let formatter = ISO8601DateFormatter()
+        formatter.timeZone = .current
+        let stamp = formatter.string(from: env.now)
         return "\(stamp) \(action) \(candidate.rule.rawValue) \(Format.bytes(candidate.bytes)) \(candidate.url.path) — \(detail)"
     }
 

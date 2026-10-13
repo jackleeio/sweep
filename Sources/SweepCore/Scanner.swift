@@ -13,14 +13,32 @@ public struct Scanner {
     }
 
     public func scan(rules: Set<RuleID> = Set(RuleID.allCases)) -> [Candidate] {
-        var out: [Candidate] = []
-        if rules.contains(.buildCaches), config.buildCaches.enabled { out += buildCaches() }
-        if rules.contains(.agentTemp), config.agentTemp.enabled { out += agentTemp() }
-        if rules.contains(.conversations), config.conversations.enabled { out += conversations() }
-        if rules.contains(.packageCaches), config.packageCaches.enabled { out += packageCaches() }
-        if rules.contains(.artifacts), config.artifacts.enabled { out += artifacts() }
-        if rules.contains(.workCopies) { out += workCopies() }
-        return out
+        // 各规则扫描的目录互不重叠，并行跑；结果仍按规则顺序排列
+        RuleID.allCases.filter { rules.contains($0) && isEnabled($0) }
+            .parallelMap(candidates(for:))
+            .flatMap { $0 }
+    }
+
+    private func isEnabled(_ rule: RuleID) -> Bool {
+        switch rule {
+        case .buildCaches: return config.buildCaches.enabled
+        case .agentTemp: return config.agentTemp.enabled
+        case .conversations: return config.conversations.enabled
+        case .packageCaches: return config.packageCaches.enabled
+        case .artifacts: return config.artifacts.enabled
+        case .workCopies: return true
+        }
+    }
+
+    private func candidates(for rule: RuleID) -> [Candidate] {
+        switch rule {
+        case .buildCaches: return buildCaches()
+        case .agentTemp: return agentTemp()
+        case .conversations: return conversations()
+        case .packageCaches: return packageCaches()
+        case .artifacts: return artifacts()
+        case .workCopies: return workCopies()
+        }
     }
 
     // MARK: - 通用
@@ -50,81 +68,98 @@ public struct Scanner {
         return parts.count == 2 && parts.allSatisfy { !$0.isEmpty && $0.allSatisfy(\.isHexDigit) }
     }
 
+    private struct CacheMatch {
+        let url: URL
+        let kind: CacheKind
+        let projectDir: URL
+        let root: URL
+    }
+
     private func buildCaches() -> [Candidate] {
-        var out: [Candidate] = []
-        for root in config.projectRoots.map(env.expand) where FileKind.of(root) == .directory {
-            walk(root, depth: 1, root: root, into: &out)
-        }
-        return byPath(out)
-    }
-
-    private func walk(_ dir: URL, depth: Int, root: URL, into out: inout [Candidate]) {
         let fm = FileManager.default
-        guard depth <= Self.maxDepth, let names = try? fm.contentsOfDirectory(atPath: dir.path) else { return }
-        for name in names {
-            let url = dir.appendingPathComponent(name)
-            switch FileKind.of(url) {
-            case .file:
-                if Self.isBunBuildName(name) {
-                    out.append(buildCache(url, kind: .bunBuild, projectDir: dir, root: root))
-                }
-            case .directory:
-                if Self.isNextCacheName(name) {
-                    if fm.fileExists(atPath: dir.appendingPathComponent("package.json").path) {
-                        out.append(buildCache(url, kind: .next, projectDir: dir, root: root))
+        var matches: [CacheMatch] = []
+        for root in config.projectRoots.map(env.expand) where FileKind.of(root) == .directory {
+            // 根目录下的各个项目并行遍历
+            let names = (try? fm.contentsOfDirectory(atPath: root.path)) ?? []
+            matches += names.parallelMap { name -> [CacheMatch] in
+                var found: [CacheMatch] = []
+                visit(name, in: root, depth: 1, root: root, into: &found)
+                return found
+            }.flatMap { $0 }
+        }
+
+        // 测量体积和查 git 是最慢的部分，并行做；进程占用检测有内部状态，留到后面串行做
+        let judged = matches.parallelMap { match -> (CacheMatch, Measurement, Verdict, Git.Tracking?) in
+            let m = Measure.measure(match.url)
+            let verdict = cacheVerdict(m)
+            if case .delete = verdict { return (match, m, verdict, Git.tracking(of: match.url)) }
+            return (match, m, verdict, nil)
+        }
+
+        return byPath(judged.map { match, m, preliminary, tracking in
+            var verdict = preliminary
+            var blocked = false
+            // 准备删除前再过两道保护
+            if case .delete(let why) = verdict {
+                if case .untracked? = tracking {
+                    if env.processProbe.isInUse(projectDir: match.projectDir, kind: match.kind) {
+                        verdict = .keep(reason: "\(why)，但有进程正在使用")
+                        blocked = true
                     }
-                } else if name == "target", fm.fileExists(atPath: url.appendingPathComponent("CACHEDIR.TAG").path) {
-                    // cargo 的产物目录：只清 Tauri 项目里的，其余的跳过不深入
-                    if dir.lastPathComponent == "src-tauri" {
-                        out.append(buildCache(url, kind: .cargoTarget, projectDir: dir.deletingLastPathComponent(), root: root))
-                    }
-                } else if !Self.skippedDirectories.contains(name) {
-                    walk(url, depth: depth + 1, root: root, into: &out)
+                } else {
+                    verdict = .keep(reason: "含 git 跟踪的文件")
                 }
-            default:
-                continue
             }
+            return Candidate(rule: .buildCaches, url: match.url, root: match.root, bytes: m.bytes, lastActivity: m.latest,
+                             verdict: verdict, blockedByProcess: blocked)
+        })
+    }
+
+    private func walk(_ dir: URL, depth: Int, root: URL, into out: inout [CacheMatch]) {
+        guard depth <= Self.maxDepth, let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return }
+        for name in names { visit(name, in: dir, depth: depth, root: root, into: &out) }
+    }
+
+    private func visit(_ name: String, in dir: URL, depth: Int, root: URL, into out: inout [CacheMatch]) {
+        let fm = FileManager.default
+        let url = dir.appendingPathComponent(name)
+        switch FileKind.of(url) {
+        case .file:
+            if Self.isBunBuildName(name) {
+                out.append(CacheMatch(url: url, kind: .bunBuild, projectDir: dir, root: root))
+            }
+        case .directory:
+            if Self.isNextCacheName(name) {
+                if fm.fileExists(atPath: dir.appendingPathComponent("package.json").path) {
+                    out.append(CacheMatch(url: url, kind: .next, projectDir: dir, root: root))
+                }
+            } else if name == "target", fm.fileExists(atPath: url.appendingPathComponent("CACHEDIR.TAG").path) {
+                // cargo 的产物目录：只清 Tauri 项目里的，其余的跳过不深入
+                if dir.lastPathComponent == "src-tauri" {
+                    out.append(CacheMatch(url: url, kind: .cargoTarget, projectDir: dir.deletingLastPathComponent(), root: root))
+                }
+            } else if !Self.skippedDirectories.contains(name) {
+                walk(url, depth: depth + 1, root: root, into: &out)
+            }
+        default:
+            return
         }
     }
 
-    private func buildCache(_ url: URL, kind: CacheKind, projectDir: URL, root: URL) -> Candidate {
-        let m = Measure.measure(url)
-        let cap = Int64(config.buildCaches.sizeCapGB * 1_073_741_824)
-
-        var verdict: Verdict
-        if let latest = m.latest {
-            let idle = idleDays(latest)
-            if idle >= config.idleDays {
-                verdict = .delete(reason: idleReason(idle))
-            } else if m.bytes > cap {
-                verdict = .delete(reason: "超过 \(Format.gb(config.buildCaches.sizeCapGB)) 上限")
-            } else {
-                verdict = .keep(reason: "最近在用")
-            }
-        } else {
-            verdict = .keep(reason: "无法读取")
+    private func cacheVerdict(_ m: Measurement) -> Verdict {
+        guard let latest = m.latest else { return .keep(reason: "无法读取") }
+        let idle = idleDays(latest)
+        if idle >= config.idleDays { return .delete(reason: idleReason(idle)) }
+        if m.bytes > Int64(config.buildCaches.sizeCapGB * 1_073_741_824) {
+            return .delete(reason: "超过 \(Format.gb(config.buildCaches.sizeCapGB)) 上限")
         }
-
-        // 准备删除前再过两道保护
-        var blocked = false
-        if case .delete(let why) = verdict {
-            if case .untracked = Git.tracking(of: url) {
-                if env.processProbe.isInUse(projectDir: projectDir, kind: kind) {
-                    verdict = .keep(reason: "\(why)，但有进程正在使用")
-                    blocked = true
-                }
-            } else {
-                verdict = .keep(reason: "含 git 跟踪的文件")
-            }
-        }
-        return Candidate(rule: .buildCaches, url: url, root: root, bytes: m.bytes, lastActivity: m.latest,
-                         verdict: verdict, blockedByProcess: blocked)
+        return .keep(reason: "最近在用")
     }
 
     // MARK: - Agent 临时构建目录
 
     private func agentTemp() -> [Candidate] {
-        let out = config.agentTemp.globs.flatMap { Glob.expand($0, env: env) }.map { match -> Candidate in
+        let out = config.agentTemp.globs.flatMap { Glob.expand($0, env: env) }.parallelMap { match -> Candidate in
             let m = Measure.measure(match.url)
             return Candidate(rule: .agentTemp, url: match.url, root: match.root, bytes: m.bytes,
                              lastActivity: m.latest, verdict: idleVerdict(m.latest, threshold: config.idleDays))
@@ -151,18 +186,20 @@ public struct Scanner {
 
     private func codexSessions(in root: URL, pins: [Pin]?) -> [Candidate] {
         guard let walker = FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil) else { return [] }
-        var out: [Candidate] = []
+        var files: [URL] = []
         for case let url as URL in walker {
             let name = url.lastPathComponent
-            guard name.hasPrefix("rollout-"), name.hasSuffix(".jsonl"), FileKind.of(url) == .file else { continue }
+            if name.hasPrefix("rollout-"), name.hasSuffix(".jsonl"), FileKind.of(url) == .file { files.append(url) }
+        }
+        // 判定时可能要通读文件找标记串，并行做
+        return files.parallelMap { url in
             let m = Measure.measure(url)
             // 文件名以会话 UUID 结尾
-            let tail = String(name.dropLast(".jsonl".count).suffix(36))
+            let tail = String(url.lastPathComponent.dropLast(".jsonl".count).suffix(36))
             let sessionID = UUID(uuidString: tail) != nil ? tail : nil
-            out.append(Candidate(rule: .conversations, url: url, root: root, bytes: m.bytes, lastActivity: m.latest,
-                                 verdict: conversationVerdict(file: url, sessionID: sessionID, latest: m.latest, pins: pins)))
+            return Candidate(rule: .conversations, url: url, root: root, bytes: m.bytes, lastActivity: m.latest,
+                             verdict: conversationVerdict(file: url, sessionID: sessionID, latest: m.latest, pins: pins))
         }
-        return out
     }
 
     /// Claude 的会话是 `<项目>/<uuid>.jsonl`，可能带一个同名目录存放工具输出。
@@ -189,15 +226,15 @@ public struct Scanner {
                 }
             }
 
-            for id in Set(files.keys).union(dirs.keys) {
+            out += Set(files.keys).union(dirs.keys).sorted().parallelMap { id in
                 let file = files[id]
                 let dir = dirs[id]
                 let parts = [file, dir].compactMap { $0 }.map(Measure.measure)
                 let latest = parts.compactMap(\.latest).max()
                 let primary = file ?? dir!
-                out.append(Candidate(rule: .conversations, url: primary, extraURLs: file != nil && dir != nil ? [dir!] : [],
-                                     root: root, bytes: parts.reduce(0) { $0 + $1.bytes }, lastActivity: latest,
-                                     verdict: conversationVerdict(file: primary, sessionID: id, latest: latest, pins: pins)))
+                return Candidate(rule: .conversations, url: primary, extraURLs: file != nil && dir != nil ? [dir!] : [],
+                                 root: root, bytes: parts.reduce(0) { $0 + $1.bytes }, lastActivity: latest,
+                                 verdict: conversationVerdict(file: primary, sessionID: id, latest: latest, pins: pins))
             }
         }
         return out
@@ -219,7 +256,7 @@ public struct Scanner {
     private func packageCaches() -> [Candidate] {
         let measured = config.packageCaches.paths.map(env.expand)
             .filter { FileKind.of($0) == .directory }
-            .map { ($0, Measure.measure($0)) }
+            .parallelMap { ($0, Measure.measure($0)) }
         let total = measured.reduce(Int64(0)) { $0 + $1.1.bytes }
         let cap = Int64(config.packageCaches.totalCapGB * 1_073_741_824)
         let capText = Format.gb(config.packageCaches.totalCapGB)
@@ -253,7 +290,7 @@ public struct Scanner {
     private func workCopies() -> [Candidate] {
         let out = config.workCopies.globs.flatMap { Glob.expand($0, env: env) }
             .filter { FileKind.of($0.url) == .directory }
-            .map { match -> Candidate in
+            .parallelMap { match -> Candidate in
                 let m = Measure.measure(match.url)
                 return Candidate(rule: .workCopies, url: match.url, root: match.root, bytes: m.bytes,
                                  lastActivity: m.latest, verdict: .keep(reason: "仅展示，不自动清理"))

@@ -100,6 +100,29 @@ final class MeasureTests: XCTestCase {
     }
 }
 
+extension MeasureTests {
+    func testHardLinkedFileInsideTreeIsCountedOnce() throws {
+        let h = TempHome()
+        h.file("d/a.bin", bytes: 200_000)
+        try FileManager.default.linkItem(at: h.path("d/a.bin"), to: h.path("d/b.bin"))
+        let bytes = Measure.measure(h.path("d")).bytes
+        XCTAssertGreaterThanOrEqual(bytes, 200_000)
+        XCTAssertLessThan(bytes, 300_000)
+    }
+
+    /// 文件在树外还有硬链接时，删掉这棵树并不会释放它占的空间。
+    func testFileAlsoLinkedFromOutsideTheTreeIsNotCounted() throws {
+        let h = TempHome()
+        h.file("store/shared.bin", bytes: 200_000)
+        h.file("store/own.bin", bytes: 50_000)
+        h.dir("project")
+        try FileManager.default.linkItem(at: h.path("store/shared.bin"), to: h.path("project/shared.bin"))
+        let bytes = Measure.measure(h.path("store")).bytes
+        XCTAssertGreaterThanOrEqual(bytes, 50_000)
+        XCTAssertLessThan(bytes, 100_000)
+    }
+}
+
 final class TokenScannerTests: XCTestCase {
     let token = "sweep-pin:v1:0f8fad5b-d9cb-469f-a165-70867728950e"
 
