@@ -24,6 +24,9 @@ final class AppModel: ObservableObject {
     @Published var confirming = false
     @Published var message: String?
     @Published var launchAtLogin = false
+    /// 整块硬盘的占用。测量要几分钟，跟在扫描后面在后台做，结果缓存。
+    @Published var storage: StorageReport?
+    @Published var measuringStorage = false
     /// 面板内容的高度，外壳据此调整窗口大小。
     @Published var panelHeight: CGFloat = 0
 
@@ -32,6 +35,7 @@ final class AppModel: ObservableObject {
     /// live 为 false 时不注册登录项、不启动定时器（用于离屏渲染界面截图）。
     init(live: Bool = true) {
         summary = ScanSummary.load(from: Env.live().scanFile)
+        storage = StorageReport.load(from: Env.live().storageFile)
         refresh()
         guard live else { return }
         enableLaunchAtLoginOnFirstRun()
@@ -88,8 +92,32 @@ final class AppModel: ObservableObject {
                 self.blocked = blocked
                 self.busy = .idle
                 completion?()
+                self.measureStorage(with: candidates)
             }
         }
+    }
+
+    /// 占用超过 6 小时没测过（或用户要求刷新）时，在后台重新测量整块硬盘。
+    func measureStorage(with candidates: [Candidate], force: Bool = false) {
+        guard !measuringStorage else { return }
+        if !force, let storage, Date().timeIntervalSince(storage.date) < 6 * 3600 { return }
+        measuringStorage = true
+        Task.detached(priority: .utility) {
+            let env = Env.live()
+            let report = VolumeUsage.current().map { StorageReport.build(env: env, candidates: candidates, volumes: $0) }
+            if let report { try? report.save(to: env.storageFile) }
+            await MainActor.run {
+                if let report { self.storage = report }
+                self.measuringStorage = false
+            }
+        }
+    }
+
+    /// 「刷新」按钮：重新扫描并重新测量占用。
+    func refreshStorage() {
+        guard busy == .idle else { return }
+        storage = storage.map { var s = $0; s.date = .distantPast; return s }
+        scan()
     }
 
     /// 点「立即清理」：先保证有一份新的扫描结果，再让用户确认。

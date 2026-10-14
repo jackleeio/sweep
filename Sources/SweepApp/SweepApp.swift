@@ -34,6 +34,7 @@ enum Main {
         case "pins": return .pins
         case "history": return .history
         case "settings": return .settings
+        case "storage": return .storage
         default: return RuleID(rawValue: args[i + 1]).map { .rule($0) }
         }
     }

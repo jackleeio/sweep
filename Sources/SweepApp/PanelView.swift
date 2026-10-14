@@ -5,6 +5,7 @@ struct PanelView: View {
     /// 面板里可以展开的区块。同一时间只展开一个。
     enum Section: Hashable {
         case rule(RuleID)
+        case storage
         case pins
         case history
         case settings
@@ -33,6 +34,8 @@ struct PanelView: View {
                 }
                 notices
                 Divider()
+                sectionHeader("完整占用", count: nil, section: .storage)
+                if open == .storage { storageList }
                 sectionHeader("已标记的对话", count: model.pins.count, section: .pins)
                 if open == .pins { pinList }
                 sectionHeader("清理记录", count: model.state.history.count, section: .history)
@@ -337,6 +340,66 @@ struct PanelView: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+
+    // MARK: - 完整占用
+
+    private static let areaColors: [String: Color] = [
+        "projects": .blue, "agentData": .purple, "caches": .orange, "appSupport": .teal, "containers": .cyan,
+        "libraryOther": .mint, "personal": .green, "applications": .indigo, "temp": .yellow, "system": .gray, "protected": .brown,
+    ]
+
+    @ViewBuilder
+    private var storageList: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            if let storage = model.storage {
+                let areas = storage.areas.sorted { $0.bytes > $1.bytes }
+                HStack {
+                    Text("已用 \(Format.bytes(storage.used)) / \(Format.bytes(storage.total))").monospacedDigit()
+                    Spacer()
+                    Text(model.measuringStorage ? "正在重新测量…" : "测量于 \(storage.date.formatted(date: .omitted, time: .shortened))")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("刷新") { model.refreshStorage() }.controlSize(.small).glassButton()
+                        .disabled(model.measuringStorage || model.busy != .idle)
+                }
+                GeometryReader { proxy in
+                    HStack(spacing: 1) {
+                        ForEach(areas, id: \.id) { area in
+                            segment(area.bytes, of: storage.used, width: proxy.size.width,
+                                    color: Self.areaColors[area.id, default: .secondary])
+                        }
+                    }
+                }
+                .frame(height: 8)
+                .clipShape(Capsule())
+                ForEach(areas, id: \.id) { area in
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 6) {
+                            Circle().fill(Self.areaColors[area.id, default: .secondary]).frame(width: 7, height: 7)
+                            Text(area.title)
+                            Spacer()
+                            if area.cleanable > 0 {
+                                Text("可清 \(Format.bytes(area.cleanable))").font(.caption).foregroundStyle(.orange).monospacedDigit()
+                            }
+                            Text(Format.bytes(area.bytes)).monospacedDigit().frame(width: 66, alignment: .trailing)
+                        }
+                        Text(area.note).font(.caption).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .padding(.leading, 13)
+                    }
+                }
+                Text("「可清」包括关着的规则打开后能清的部分。").font(.caption2).foregroundStyle(.tertiary)
+            } else {
+                Text(model.measuringStorage ? "正在测量整块硬盘，需要几分钟…" : "还没有测量过。")
+                    .font(.caption).foregroundStyle(.secondary)
+                if !model.measuringStorage {
+                    Button("开始测量") { model.refreshStorage() }.controlSize(.small).glassButton()
+                }
+            }
+        }
+        .font(.callout)
+        .padding(.leading, 16)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var pinList: some View {

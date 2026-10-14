@@ -12,6 +12,7 @@ sweep — 定时清理构建缓存、依赖、应用缓存和 agent 对话
   sweep pins                      列出已标记的对话
   sweep status                    查看状态
   sweep refs                      列出被全局命令、技能、定时任务引用的项目路径
+  sweep storage                   整块硬盘的占用，以及每块能不能删（需要几分钟）
   sweep arm | disarm              开启 / 关闭自动清理
 """
 
@@ -177,6 +178,24 @@ func status() throws {
     print("已标记对话：\((try? pins.all().count) ?? 0) 个")
 }
 
+/// 整块硬盘的占用，按区域列出，并说明每块能不能删。要测量整个主目录，需要几分钟。
+func storage() throws {
+    let config = try Config.load(from: env.configFile)
+    guard let volumes = VolumeUsage.current() else { fail("读不到磁盘卷的信息") }
+    let candidates = Scanner(config: config, env: env, pins: pins, includeDisabled: true).scan()
+    let report = StorageReport.build(env: env, candidates: candidates, volumes: volumes)
+    try? report.save(to: env.storageFile)
+    print("已用 \(Format.bytes(report.used)) / 总 \(Format.bytes(report.total))\n")
+    for area in report.areas.sorted(by: { $0.bytes > $1.bytes }) {
+        let clean = area.cleanable > 0 ? "，其中 Sweep 可清 \(Format.bytes(area.cleanable))" : ""
+        print("\(Format.bytes(area.bytes).padding(toLength: 9, withPad: " ", startingAt: 0)) \(area.title)\(clean)")
+        print("          \(area.note)")
+        for item in area.largest.prefix(3) where item.bytes >= 1_000_000_000 {
+            print("          · \(Format.bytes(item.bytes))  \(item.path.replacingOccurrences(of: env.home.path, with: "~"))")
+        }
+    }
+}
+
 /// 列出项目目录之外指向项目内部的引用。被引用的项目，依赖不会被清理。
 func listReferences() {
     let config = (try? Config.load(from: env.configFile)) ?? Config()
@@ -202,6 +221,7 @@ do {
     case "pins": try listPins()
     case "status": try status()
     case "refs": listReferences()
+    case "storage": try storage()
     case "arm": try setArmed(true)
     case "disarm": try setArmed(false)
     default: print(usage)
