@@ -181,6 +181,17 @@ public struct KeptGroup: Codable, Equatable {
     public var bytes: Int64
 }
 
+public struct ScanTotals: Equatable {
+    /// 扫描到的总量，嵌套的部分只算一次。
+    public var scanned: Int64
+    /// 开着的规则会清掉的。
+    public var cleanable: Int64
+    /// 规则关着所以不会清、但打开后能清的。
+    public var switchedOff: Int64
+    /// 命中了但会保留的。
+    public var kept: Int64
+}
+
 /// 界面上的一行分组：同一类的项合在一起显示数量和体积。
 public struct SummaryGroup: Codable, Equatable {
     public var label: String
@@ -201,6 +212,9 @@ public struct RuleSummary: Codable, Equatable {
     public var kept: [KeptGroup] = []
     /// 全部命中项按类别分组：先列会清理的，再列保留的，各自按体积从大到小。
     public var groups: [SummaryGroup] = []
+    /// 算总账用的净值：扣掉了已经由别的规则量过的嵌套部分。旧版本存的摘要里没有，此时退回原值。
+    public var netDeletableBytes: Int64?
+    public var netKeptBytes: Int64?
 
     public init(deletableCount: Int = 0, deletableBytes: Int64 = 0, keptCount: Int = 0, keptBytes: Int64 = 0) {
         self.deletableCount = deletableCount
@@ -219,6 +233,8 @@ public struct RuleSummary: Codable, Equatable {
         top = try c.decodeIfPresent([ScanItem].self, forKey: .top) ?? []
         kept = try c.decodeIfPresent([KeptGroup].self, forKey: .kept) ?? []
         groups = try c.decodeIfPresent([SummaryGroup].self, forKey: .groups) ?? []
+        netDeletableBytes = try c.decodeIfPresent(Int64.self, forKey: .netDeletableBytes)
+        netKeptBytes = try c.decodeIfPresent(Int64.self, forKey: .netKeptBytes)
     }
 }
 
@@ -229,6 +245,22 @@ public struct ScanSummary: Codable, Equatable {
 
     public subscript(rule: RuleID) -> RuleSummary? { rules[rule.rawValue] }
     public var deletableBytes: Int64 { rules.values.reduce(0) { $0 + $1.deletableBytes } }
+    /// 总账。关着的规则里「打开后能清」的单列一项。
+    public func totals(disabled: Set<RuleID>) -> ScanTotals {
+        var totals = ScanTotals(scanned: 0, cleanable: 0, switchedOff: 0, kept: 0)
+        for (key, rule) in rules {
+            let deletable = rule.netDeletableBytes ?? rule.deletableBytes
+            if let id = RuleID(rawValue: key), disabled.contains(id) {
+                totals.switchedOff += deletable
+            } else {
+                totals.cleanable += deletable
+            }
+            totals.kept += rule.netKeptBytes ?? rule.keptBytes
+        }
+        totals.scanned = totals.cleanable + totals.switchedOff + totals.kept
+        return totals
+    }
+
     /// 只统计给定规则里可清理的量。界面用它来排除关着的规则。
     public func deletable(in wanted: Set<RuleID>) -> (count: Int, bytes: Int64) {
         wanted.compactMap { rules[$0.rawValue] }.reduce((0, Int64(0))) { ($0.0 + $1.deletableCount, $0.1 + $1.deletableBytes) }
@@ -238,6 +270,19 @@ public struct ScanSummary: Codable, Equatable {
     private static let topCount = 8
 
     public static func make(from candidates: [Candidate], date: Date) -> ScanSummary {
+        // 工作树里的依赖和缓存另有规则在量。算总账时要从工作树里扣掉，免得同一块空间算两次。
+        let containers = candidates.filter { $0.rule == .workCopies }.map { $0.url.path + "/" }
+        var nested: [String: Int64] = [:]
+        if !containers.isEmpty {
+            for candidate in candidates where candidate.rule != .workCopies {
+                let path = candidate.url.path
+                if let container = containers.first(where: path.hasPrefix) { nested[container, default: 0] += candidate.bytes }
+            }
+        }
+        func net(_ list: [Candidate]) -> Int64 {
+            list.reduce(0) { $0 + max(0, $1.bytes - (nested[$1.url.path + "/"] ?? 0)) }
+        }
+
         var rules: [String: RuleSummary] = [:]
         for (rule, items) in Dictionary(grouping: candidates, by: \.rule) {
             let deletable = items.filter(\.isDelete).sorted { $0.bytes > $1.bytes }
@@ -255,6 +300,8 @@ public struct ScanSummary: Codable, Equatable {
                     .sorted { ($0.bytes, $1.label) > ($1.bytes, $0.label) }
             }
             entry.groups = grouped(deletable, deletable: true) + grouped(kept, deletable: false)
+            entry.netDeletableBytes = net(deletable)
+            entry.netKeptBytes = net(kept)
             rules[rule.rawValue] = entry
         }
         return ScanSummary(date: date, rules: rules)

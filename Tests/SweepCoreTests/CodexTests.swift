@@ -637,3 +637,51 @@ final class CompressedSessionTests: XCTestCase {
         XCTAssertEqual(scan(h), [])
     }
 }
+
+final class ScanTotalsTests: XCTestCase {
+    private func item(_ rule: RuleID, _ path: String, _ bytes: Int64, delete: Bool) -> Candidate {
+        Candidate(rule: rule, url: URL(fileURLWithPath: path), root: URL(fileURLWithPath: "/"), bytes: bytes,
+                  lastActivity: nil, verdict: delete ? .delete(reason: "x") : .keep(reason: "y"))
+    }
+
+    /// 工作树里的 node_modules 和缓存各有自己的规则。算总账时，工作树只算扣掉它们之后剩下的部分。
+    private var sample: ScanSummary {
+        ScanSummary.make(from: [
+            item(.workCopies, "/p/wt", 1000, delete: false),
+            item(.dependencies, "/p/wt/node_modules", 300, delete: true),
+            item(.buildCaches, "/p/wt/.next", 100, delete: false),
+            item(.packageCaches, "/q/cache", 50, delete: true),
+            item(.bigItems, "/q/Docker.raw", 400, delete: false),
+        ], date: Date())
+    }
+
+    func testScannedTotalDoesNotCountNestedItemsTwice() {
+        let totals = sample.totals(disabled: [])
+        XCTAssertEqual(totals.scanned, 1450)
+        XCTAssertEqual(totals.cleanable, 350)
+        XCTAssertEqual(totals.switchedOff, 0)
+        XCTAssertEqual(totals.kept, 1100)
+        XCTAssertEqual(totals.scanned, totals.cleanable + totals.switchedOff + totals.kept)
+    }
+
+    func testWhatDisabledRulesWouldCleanIsReportedSeparately() {
+        let totals = sample.totals(disabled: [.dependencies])
+        XCTAssertEqual(totals.cleanable, 50)
+        XCTAssertEqual(totals.switchedOff, 300)
+        XCTAssertEqual(totals.kept, 1100)
+    }
+
+    func testRowFiguresStayAsMeasuredForEachRule() {
+        XCTAssertEqual(sample[.workCopies]?.keptBytes, 1000)
+        XCTAssertEqual(sample[.dependencies]?.deletableBytes, 300)
+    }
+
+    func testSummarySavedBeforeTotalsExistedStillGivesSensibleTotals() throws {
+        let h = TempHome()
+        let old = #"{"date":"2026-10-13T13:35:00Z","rules":{"buildCaches":{"deletableBytes":5,"deletableCount":1,"keptBytes":2,"keptCount":1}}}"#
+        let summary = try XCTUnwrap(ScanSummary.load(from: h.file("last-scan.json", text: old)))
+        let totals = summary.totals(disabled: [])
+        XCTAssertEqual(totals.scanned, 7)
+        XCTAssertEqual(totals.cleanable, 5)
+    }
+}

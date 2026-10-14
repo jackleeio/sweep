@@ -27,9 +27,9 @@ struct PanelView: View {
             VStack(alignment: .leading, spacing: 10) {
                 header
                 Divider()
+                scanTotals
                 VStack(alignment: .leading, spacing: 5) {
                     ForEach(Self.rules, id: \.self) { ruleRow($0) }
-                    Text(scanCaption).font(.caption).foregroundStyle(.secondary).padding(.top, 2)
                 }
                 notices
                 Divider()
@@ -243,6 +243,60 @@ struct PanelView: View {
         if text.hasPrefix("Projects/") { text = String(text.dropFirst("Projects/".count)) }
         let parts = text.split(separator: "/")
         return parts.count > 4 ? "\(parts[0])/…/\(parts.suffix(2).joined(separator: "/"))" : text
+    }
+
+    // MARK: - 扫描总账
+
+    /// 一共扫描了多少，其中多少会清、多少因为规则关着不会清、多少保留。
+    @ViewBuilder
+    private var scanTotals: some View {
+        if let summary = model.summary {
+            let totals = summary.totals(disabled: model.config.disabledRules)
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("已扫描 \(Format.bytes(totals.scanned))").font(.callout.weight(.semibold)).monospacedDigit()
+                    Spacer()
+                    Text(scanTime(summary.date)).font(.caption).foregroundStyle(.secondary)
+                }
+                GeometryReader { proxy in
+                    HStack(spacing: 1) {
+                        segment(totals.cleanable, of: totals.scanned, width: proxy.size.width, color: .orange)
+                        segment(totals.switchedOff, of: totals.scanned, width: proxy.size.width, color: .orange.opacity(0.35))
+                        segment(totals.kept, of: totals.scanned, width: proxy.size.width, color: .secondary.opacity(0.45))
+                    }
+                }
+                .frame(height: 6)
+                .clipShape(Capsule())
+                HStack(spacing: 12) {
+                    legend(.orange, "可清理", totals.cleanable)
+                    legend(.orange.opacity(0.35), "规则关着", totals.switchedOff)
+                    legend(.secondary.opacity(0.45), "保留", totals.kept)
+                    Spacer(minLength: 0)
+                }
+                .font(.caption)
+            }
+            .padding(.bottom, 2)
+        } else {
+            Text(scanCaption).font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private func segment(_ part: Int64, of whole: Int64, width: CGFloat, color: Color) -> some View {
+        color.frame(width: whole > 0 ? max(part > 0 ? 2 : 0, width * CGFloat(part) / CGFloat(whole)) : 0)
+    }
+
+    private func legend(_ color: Color, _ title: String, _ bytes: Int64) -> some View {
+        HStack(spacing: 4) {
+            Circle().fill(color).frame(width: 7, height: 7)
+            Text(title).foregroundStyle(.secondary)
+            Text(Format.bytes(bytes)).monospacedDigit()
+        }
+    }
+
+    private func scanTime(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "M 月 d 日 HH:mm"
+        return "\(model.busy == .scanning ? "正在重新扫描 · 上次 " : "扫描于 ")\(formatter.string(from: date))"
     }
 
     private var scanCaption: String {

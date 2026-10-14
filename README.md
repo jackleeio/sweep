@@ -41,14 +41,19 @@ macOS 菜单栏小工具：自动清理构建缓存、闲置依赖、各类下�
 |---|---|---|---|
 | 构建缓存 | `~/Projects` 下的 `.next`、`.next-*`、`*.bun-build`、`src-tauri/target` | 3 天没更新，或单个超过 10 GB | 开 |
 | 闲置项目的依赖 | `node_modules`，以及有锁文件或 requirements 的虚拟环境 | 所在项目 14 天没有改动 | 开 |
+| 工作树和构建副本 | `~/Projects/*-worktrees/*`、`~/Projects/*-build*`、`~/.codex/worktrees/*/*` | 干净、14 天没动、提交都在分支上的 git 工作树 | 关 |
 | 包与工具缓存 | Yarn、npm、pnpm、bun、uv、pip 的下载缓存，Docker Scout | 合计超过 20 GB 时全部清空 | 开 |
 | 应用缓存 | `~/Library/Caches` 下其他应用的缓存 | 3 天没更新 | 开 |
 | Agent 临时目录 | `~/.cache/bnbot-*`、`~/Library/Caches/bnbot-*` | 3 天没更新 | 开 |
-| Agent 对话 | Codex 的 `sessions`、`archived_sessions`；Claude 的 `projects/*/<uuid>.jsonl` 及同名目录 | 3 天没更新且未标记 | 开 |
+| Codex 对话 | `~/.codex/sessions`、`archived_sessions` 里的会话文件，含压缩后的 `.jsonl.zst` | 见下一节 | 开 |
+| Claude 对话 | `~/.claude/projects/*/<uuid>.jsonl` 及同名目录 | 7 天没更新且未标记 | 开 |
 | Agent 产物 | `~/.codex/visualizations`、`generated_images` | 30 天没更新 | 关 |
-| 工作副本 | `~/Projects/*-worktrees/*`、`~/Projects/*-build*` | 永不自动清理，只显示体积 | — |
+| 语音输入的录音 | 闪电说的 `workspace/history/recordings` | 7 天前的 | 开 |
+| 其他大户 | Docker 虚拟磁盘、Claude 虚拟机镜像、Codex 索引库、BNBot 日志库 | 永不清理，只显示体积 | — |
 
 上表是程序的默认值。开关和阈值在菜单栏的「设置」里改，保存在 `~/Library/Application Support/Sweep/config.json`。内置的路径列表写在代码里，配置文件只保存额外添加的（`extraPaths` 等）和 `excludes`（任何规则都不碰的路径）。
+
+扫描时关着的规则也会量出来，界面上照常显示「打开后能清多少」，但不会清理，也不计入合计。
 
 几个取舍：
 
@@ -56,7 +61,26 @@ macOS 菜单栏小工具：自动清理构建缓存、闲置依赖、各类下�
 - **包缓存按体积而不是按时间**。它们一直在被使用，定期清空只会反复重新下载。
 - **依赖按项目是否活跃判断**。项目的活跃时间取源码、git 操作和最近一次安装三者中最新的；同一个 git 仓库里的包共用一个时间，避免只清掉 monorepo 的一部分。
 - **应用缓存默认保留 AI 工具的**。名字里含 openai、claude、codex、bnbot、cursor 等关键词的照常列出体积，但不清理。
-- **工作副本不自动删**。里面可能有未提交的代码。
+- **工作树只移除有把握的**。必须是 git 工作树、没有任何未提交或未跟踪的改动、当前提交在某个分支上。移除的只是检出的文件，分支留在主仓库里。不是 git 工作树的普通副本永远只展示。
+
+### Codex 对话怎么判断
+
+Sweep 只读地查看 Codex 自己的状态（`state_5.sqlite` 和 `.codex-global-state.json`），把对话分成几类，界面上逐类显示数量和体积：
+
+| 类别 | 处理 |
+|---|---|
+| 在 Codex 里 pin 的 | 保留 |
+| 在置顶项目里的（按工作目录、分配记录或侧栏顺序判断） | 保留 |
+| 用 `sweep keep` 标记的 | 保留 |
+| 7 天内更新过的 | 保留 |
+| 7 天以上没更新的 | 删除 |
+| 已归档的 | 安静 3 天后删除 |
+| 子 agent 的会话 | 跟随所属对话：所属对话保留它就保留，所属对话删除它也删除 |
+| 文件还在、但 Codex 里已经没有记录的 | 7 天以上没更新则删除 |
+
+读不懂 Codex 的状态时，一条 Codex 对话都不删。
+
+Codex 会把旧会话压缩成 `.jsonl.zst`，压缩后的内容无法搜索标记串。所以每次扫描都会趁会话文件还没被压缩，把 `sweep keep` 的标记串对上会话 ID 并写进名单；对于还没对上号的标记，任何在它之后更新过的压缩文件都按「可能是它」保留。
 
 ## 保护规则
 
@@ -119,7 +143,6 @@ sweep arm | disarm              # 开启 / 关闭自动清理
 
 ## 已知限制
 
-- **Codex 里 pin 的对话还不会自动保留。** pin 状态存在 `~/.codex/.codex-global-state.json` 的 `pinned-thread-ids` 里，目前只认 `sweep keep` 打的标记。
 - **Codex 的索引库不会被清理。** `~/.codex/state_5.sqlite` 记录了每个会话文件的路径，`thread_history_1.sqlite` 存着会话内容的另一份投影（约 7G）。Sweep 只删会话文件，不动这两个库。
 - **体积是估算。** 能识别硬链接，但识别不了 APFS 的克隆文件；实际释放量可能低于显示值。
 - **读不到受系统保护的目录。** 微信、Chrome 配置、邮件、废纸篓等需要「完全磁盘访问权限」，Sweep 不涉及这些。
@@ -129,5 +152,6 @@ sweep arm | disarm              # 开启 / 关闭自动清理
 
 ```bash
 swift test                                                       # 全部测试
-.build/release/SweepApp --snapshot out.png --open packageCaches  # 把面板离屏渲染成图片
+.build/release/SweepApp --snapshot out.png --open conversations  # 把面板内容离屏渲染成图片（不含玻璃外壳）
+SWEEP_DEBUG_FRAME=frame.txt .build/release/SweepApp --show-panel # 固定显示真实面板并写出窗口位置，供截屏核对
 ```
