@@ -32,4 +32,4 @@ sweep scan                 # 只读扫描，验证规则在真实数据上的结
 | `Tests/SweepCoreTests` | 测试；`TestSupport.swift` 里有假 home 和假 Codex 目录的搭建工具 |
 | `scripts` | 安装、卸载、发版脚本，app 的 Info.plist，定时任务模板 |
 
-规则和保护机制的完整说明见 README。
+规则和保护机制的完整说明见 README。README 有中英两版（`README.md` 英文、`README.zh-CN.md` 中文），改动行为时两份要一起更新。

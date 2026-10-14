@@ -1,164 +1,170 @@
 # Sweep
 
-macOS 菜单栏小工具：自动清理构建缓存、闲置依赖、各类下载缓存和不再更新的 agent 对话，目标是让磁盘始终留有足够的余量。
+English | [中文](README.zh-CN.md)
 
-起因是一个 Next.js 项目的 Turbopack dev 缓存悄悄涨到了 136G，加上 agent 的会话记录、各种包缓存，把 1T 的硬盘占到了 97%。
+A macOS menu bar utility that automatically cleans up build caches, idle dependencies, download caches and stale AI-agent conversations, so your disk always keeps enough free space.
 
-## 组成
+It started when a Next.js project's Turbopack dev cache quietly grew to 136 GB. Together with agent session logs and package caches, that filled a 1 TB disk to 97%.
 
-| 部分 | 位置 | 作用 |
+## Components
+
+| Part | Location | Role |
 |---|---|---|
-| `SweepCore` | `Sources/SweepCore` | 规则、扫描、删除、标记名单、调度，全部逻辑都在这里 |
-| `sweep` | `~/.local/bin/sweep` | 命令行；定时任务和 agent 都调用它 |
-| `Sweep.app` | `/Applications/Sweep.app` | 菜单栏界面：看状态、展开明细、改设置、手动清理 |
-| 定时任务 | `~/Library/LaunchAgents/com.jacklee.sweep.daily.plist` | 每 10 分钟调用一次 `sweep run --scheduled` |
+| `SweepCore` | `Sources/SweepCore` | Rules, scanning, deletion, the pin list and scheduling — all the logic lives here |
+| `sweep` | `~/.local/bin/sweep` | Command-line tool, called by the scheduled job and by agents |
+| `Sweep.app` | `/Applications/Sweep.app` | Menu bar panel: status, per-rule details, settings, manual cleanup |
+| Scheduled job | `~/Library/LaunchAgents/com.jacklee.sweep.daily.plist` | Runs `sweep run --scheduled` every 10 minutes |
 
-菜单栏 app 只是查看和控制的窗口。它没开的时候，定时清理照常进行。
+The menu bar app is only a window for viewing and control. Scheduled cleanup keeps running when it is closed.
 
-## 安装与升级
+## Install and upgrade
+
+From source (recommended — this also installs the CLI and the scheduled job):
 
 ```bash
-./scripts/install.sh     # 构建并安装，重复执行即升级
-./scripts/uninstall.sh   # 卸载（保留配置、标记名单和日志）
+./scripts/install.sh     # build and install; run again to upgrade
+./scripts/uninstall.sh   # uninstall (keeps settings, pin list and logs)
 ```
 
-需要 Xcode（用到其中的 Swift 工具链和测试框架）。
+Requires Xcode (for the Swift toolchain and test frameworks).
 
-## 什么时候清理
+You can also download a packaged `Sweep.app` from [Releases](https://github.com/jackleeio/sweep/releases), with three limitations for now: Apple silicon only; not notarized yet, so macOS blocks the first launch and you need to allow it under System Settings › Privacy & Security; and it is only the menu bar app — the CLI and scheduled job still need a source install.
 
-定时任务每 10 分钟被唤起一次，绝大多数时候什么都不做、立刻退出：
+## When it cleans
 
-- **每日例行**：每天 03:00 之后的第一次唤起做一次清理。当时在睡眠就等唤醒后补上。
-- **空间不足**：可用空间低于警戒线（默认 100 GB）时立即清理，不等第二天；每小时最多一次。
-- **达不到目标余量**：每日清理后可用空间仍低于目标（默认 300 GB），就按收紧规则再清一遍。
-- **尚未确认**：用户亲手确认过一次清理之前，只扫描并提醒，不删除任何东西。
+The scheduled job wakes up every 10 minutes and almost always exits immediately:
 
-收紧规则指：缓存类规则从「3 天没更新」收紧到「1 小时没更新」，包缓存不看上限直接清空，闲置依赖的门槛降到 3 天。对话规则不受影响，空间再紧张也不会加快删除对话。
+- **Daily**: the first wake-up after 03:00 runs a cleanup. If the Mac was asleep, it catches up after waking.
+- **Low space**: when free space drops below the floor (100 GB by default), it cleans right away instead of waiting for the next day — at most once an hour.
+- **Below target**: if free space is still under the target (300 GB by default) after the daily cleanup, it runs a second pass with tighter rules.
+- **Not yet confirmed**: until you confirm a cleanup by hand once, it only scans and notifies; nothing is deleted.
 
-## 清理规则
+Tighter rules mean: cache rules go from "untouched for 3 days" to "untouched for 1 hour", package caches are emptied regardless of their cap, and the idle-dependency threshold drops to 3 days. Conversation rules are never tightened — low disk space never speeds up conversation deletion.
 
-| 规则 | 匹配范围 | 清理条件 | 默认 |
+## Rules
+
+| Rule | Scope | Cleaned when | Default |
 |---|---|---|---|
-| 构建缓存 | `~/Projects` 下的 `.next`、`.next-*`、`*.bun-build`、`src-tauri/target` | 3 天没更新，或单个超过 10 GB | 开 |
-| 闲置项目的依赖 | `node_modules`，以及有锁文件或 requirements 的虚拟环境 | 所在项目 14 天没有改动 | 开 |
-| 工作树和构建副本 | `~/Projects/*-worktrees/*`、`~/Projects/*-build*`、`~/.codex/worktrees/*/*` | 干净、14 天没动、提交都在分支上的 git 工作树 | 关 |
-| 包与工具缓存 | Yarn、npm、pnpm、bun、uv、pip 的下载缓存，Docker Scout | 合计超过 20 GB 时全部清空 | 开 |
-| 应用缓存 | `~/Library/Caches` 下其他应用的缓存 | 3 天没更新 | 开 |
-| Agent 临时目录 | `~/.cache/bnbot-*`、`~/Library/Caches/bnbot-*` | 3 天没更新 | 开 |
-| Codex 对话 | `~/.codex/sessions`、`archived_sessions` 里的会话文件，含压缩后的 `.jsonl.zst` | 见下一节 | 开 |
-| Claude 对话 | `~/.claude/projects/*/<uuid>.jsonl` 及同名目录 | 7 天没更新且未标记 | 开 |
-| Agent 产物 | `~/.codex/visualizations`、`generated_images` | 30 天没更新 | 关 |
-| 语音输入的录音 | 闪电说的 `workspace/history/recordings` | 7 天前的 | 开 |
-| 其他大户 | Docker 虚拟磁盘、Claude 虚拟机镜像、Codex 索引库、BNBot 日志库 | 永不清理，只显示体积 | — |
+| Build caches | `.next`, `.next-*`, `*.bun-build`, `src-tauri/target` under `~/Projects` | Untouched for 3 days, or a single cache over 10 GB | On |
+| Idle project dependencies | `node_modules`, and virtual envs that have a lockfile or requirements file | The project hasn't changed for 14 days | On |
+| Worktrees and build copies | `~/Projects/*-worktrees/*`, `~/Projects/*-build*`, `~/.codex/worktrees/*/*` | Clean git worktrees, untouched for 14 days, with all commits on a branch | Off |
+| Package and tool caches | Yarn, npm, pnpm, bun, uv and pip download caches; Docker Scout | All emptied once their total exceeds 20 GB | On |
+| App caches | Other apps' caches in `~/Library/Caches` | Untouched for 3 days | On |
+| Agent temp directories | `~/.cache/bnbot-*`, `~/Library/Caches/bnbot-*` | Untouched for 3 days | On |
+| Codex conversations | Session files in `~/.codex/sessions` and `archived_sessions`, including compressed `.jsonl.zst` | See the next section | On |
+| Claude conversations | `~/.claude/projects/*/<uuid>.jsonl` and the matching directory | Untouched for 7 days and not pinned | On |
+| Agent artifacts | `~/.codex/visualizations`, `generated_images` | Untouched for 30 days | Off |
+| Voice-input recordings | Shandianshuo's `workspace/history/recordings` | Older than 7 days | On |
+| Other large items | Docker's virtual disk, the Claude desktop VM image, Codex's index database, BNBot's log database | Never cleaned, only shown | — |
 
-上表是程序的默认值。开关和阈值在菜单栏的「设置」里改，保存在 `~/Library/Application Support/Sweep/config.json`。内置的路径列表写在代码里，配置文件只保存额外添加的（`extraPaths` 等）和 `excludes`（任何规则都不碰的路径）。
+These are the built-in defaults. Switches and thresholds can be changed under Settings in the menu bar panel and are stored in `~/Library/Application Support/Sweep/config.json`. Built-in path lists live in the code; the config file only stores additions (`extraPaths` and so on) and `excludes` (paths no rule will ever touch).
 
-扫描时关着的规则也会量出来，界面上照常显示「打开后能清多少」，但不会清理，也不计入合计。
+Rules that are switched off are still measured during a scan, so the panel shows how much they would free — but they don't clean anything and don't count toward the totals.
 
-几个取舍：
+Some trade-offs:
 
-- **构建缓存有体积上限**。一直在用的项目永远不会「3 天没更新」，那个 136G 的缓存正是这样长出来的。超过上限时如果检测到 dev server 在跑，就不删，改为发通知。
-- **包缓存按体积而不是按时间**。它们一直在被使用，定期清空只会反复重新下载。
-- **依赖按项目是否活跃判断**。项目的活跃时间取源码、git 操作和最近一次安装三者中最新的；同一个 git 仓库里的包共用一个时间，避免只清掉 monorepo 的一部分。
-- **应用缓存默认保留 AI 工具的**。名字里含 openai、claude、codex、bnbot、cursor 等关键词的照常列出体积，但不清理。
-- **工作树只移除有把握的**。必须是 git 工作树、没有任何未提交或未跟踪的改动、当前提交在某个分支上。移除的只是检出的文件，分支留在主仓库里。不是 git 工作树的普通副本永远只展示。
+- **Build caches have a size cap.** A project you use every day is never "untouched for 3 days", which is exactly how that 136 GB cache grew. When a cache is over the cap but a dev server is running, Sweep leaves it alone and sends a notification instead.
+- **Package caches are capped by size, not age.** They are in constant use, so emptying them on a schedule would only cause repeated downloads.
+- **Dependencies follow project activity.** A project's activity time is the newest of its source files, git operations and last install; all packages in one git repository share that time, so a monorepo is never half-cleaned.
+- **AI tool caches are kept by default.** App caches whose names contain openai, claude, codex, bnbot, cursor and similar keywords are listed with their size but not cleaned.
+- **Only safe worktrees are removed.** A worktree must be a git worktree with no uncommitted or untracked changes, and its current commit must be on a branch. Removal only deletes the checked-out files; the branch stays in the main repository. Plain copies that aren't git worktrees are only ever shown.
 
-### Codex 对话怎么判断
+### How Codex conversations are judged
 
-Sweep 只读地查看 Codex 自己的状态（`state_5.sqlite` 和 `.codex-global-state.json`），把对话分成几类，界面上逐类显示数量和体积：
+Sweep reads Codex's own state (`state_5.sqlite` and `.codex-global-state.json`) read-only and sorts conversations into groups, each shown in the panel with its count and size:
 
-| 类别 | 处理 |
+| Group | Action |
 |---|---|
-| 在 Codex 里 pin 的 | 保留 |
-| 在置顶项目里的（按工作目录、分配记录或侧栏顺序判断） | 保留 |
-| 用 `sweep keep` 标记的 | 保留 |
-| 7 天内更新过的 | 保留 |
-| 7 天以上没更新的 | 删除 |
-| 已归档的 | 安静 3 天后删除 |
-| 子 agent 的会话 | 跟随所属对话：所属对话保留它就保留，所属对话删除它也删除 |
-| 文件还在、但 Codex 里已经没有记录的 | 7 天以上没更新则删除 |
+| Pinned in Codex | Keep |
+| In a pinned project (by working directory, assignment or sidebar order) | Keep |
+| Marked with `sweep keep` | Keep |
+| Updated within 7 days | Keep |
+| Untouched for more than 7 days | Delete |
+| Archived | Delete after 3 quiet days |
+| Sub-agent sessions | Follow their parent conversation: kept if it is kept, deleted if it is deleted |
+| Files Codex no longer has a record of | Delete if untouched for more than 7 days |
 
-读不懂 Codex 的状态时，一条 Codex 对话都不删。
+If Codex's state can't be read, no Codex conversation is deleted.
 
-Codex 会把旧会话压缩成 `.jsonl.zst`，压缩后的内容无法搜索标记串。所以每次扫描都会趁会话文件还没被压缩，把 `sweep keep` 的标记串对上会话 ID 并写进名单；对于还没对上号的标记，任何在它之后更新过的压缩文件都按「可能是它」保留。
+Codex compresses old sessions into `.jsonl.zst`, and compressed files can't be searched for pin markers. So every scan binds `sweep keep` markers to their session IDs while the session file is still uncompressed. For markers that haven't been bound yet, any compressed file updated after the marker was created is treated as "might be it" and kept.
 
-## 保护规则
+## Safety rules
 
-这些写死在代码里，并且都有测试覆盖：
+These are hard-coded and covered by tests:
 
-1. 每一项在删除前重新校验：必须真实存在、本身不是符号链接、解析符号链接后严格位于该规则的根目录内。
-2. 路径中含 `memory` 或 `.git` 的一律拒绝。Claude 的记忆目录因此不可能被删。
-3. 对话只认 UUID 形态的文件名，同级的其他文件不会命中。
-4. 构建缓存和依赖里只要有被 git 跟踪的文件就跳过；git 给不出结论时也跳过。
-5. 被项目目录之外引用的项目，依赖一律保留。引用来源包括全局 link 的包、PATH 上的命令、各 agent 的技能链接、定时任务配置。`sweep refs` 可以查看当前识别到的引用。
-6. 读不全的目录一律保留。
-7. 配置文件损坏时整次运行中止，不回退到默认值。
-8. 标记名单损坏时，一条对话都不删。
-9. 每删完一项立即写日志。清理中途被终止，已删的部分也有记录。
+1. Every item is re-validated right before deletion: it must exist, must not itself be a symlink, and after resolving symlinks must sit strictly inside its rule's root directory.
+2. Any path containing a `memory` or `.git` component is refused, so Claude's memory directory can never be deleted.
+3. Conversations are matched only by UUID-shaped file names; other files next to them never match.
+4. Build caches and dependencies are skipped if they contain any git-tracked file, and also when git can't give an answer.
+5. Projects referenced from outside the project directory keep their dependencies. References include globally linked packages, commands on the PATH, agent skill links and scheduled-job configurations. `sweep refs` lists the references it currently detects.
+6. Directories that can't be fully read are kept.
+7. A corrupt config file aborts the whole run instead of falling back to defaults.
+8. A corrupt pin list means no conversation is deleted.
+9. Each deletion is logged immediately, so even an interrupted cleanup leaves a record.
 
-第 5 条和第 9 条是吃过亏之后补的：早期版本删掉了 `bnbot-kit/cli` 的 `node_modules`，而 `bnbot` 命令是 npm link 到那里的；同一次清理被中途终止后，日志里什么都没留下。
+Rules 5 and 9 were added after real mistakes: an early version deleted `bnbot-kit/cli/node_modules`, which the `bnbot` command was npm-linked to; and when that cleanup was interrupted, the log had nothing in it.
 
-## 标记不想删的对话
+## Pinning conversations you want to keep
 
-在对话里对 agent 说「标记这个对话，别删」。agent 会运行：
-
-```bash
-sweep keep "标签"
-```
-
-这条规则写在 `~/.claude/CLAUDE.md` 和 `~/.codex/AGENTS.md` 里。
-
-识别方式有两层：
-
-- Claude Code 的环境里有 `CLAUDE_CODE_SESSION_ID`，直接按会话 ID 记入名单。
-- 命令会输出一个标记串（`sweep-pin:v1:<uuid>`）。命令输出会被记入会话文件，清理前会在文件里查找名单中登记过的标记串。Codex 靠这一层。
-
-只有名单里登记过的标记串才算数，所以文档或源码里出现这个前缀不会造成误标记。
+Tell the agent "pin this conversation, don't delete it". The agent runs:
 
 ```bash
-sweep pins                 # 列出已标记的对话
-sweep unkeep "标签"        # 取消标记
+sweep keep "label"
 ```
 
-## 完整占用
+The instruction for this lives in `~/.claude/CLAUDE.md` and `~/.codex/AGENTS.md`.
 
-面板里的「完整占用」把整块硬盘按区域列出：项目代码、Agent 与开发工具、缓存、应用数据、应用容器、临时文件、你的文件、应用程序、系统，以及量不到的部分。每块显示体积、其中 Sweep 能清多少，并说明这块能不能删、该怎么处理。
+Conversations are recognized in two ways:
 
-测量整个主目录要两三分钟，所以跟在扫描后面在后台做，结果缓存 6 小时；也可以点「刷新」或运行 `sweep storage`。「读不到的部分」是已用空间减去能量到的各块，主要是受系统保护的目录（微信、浏览器、邮件、照片图库、废纸篓）。
+- Claude Code exposes `CLAUDE_CODE_SESSION_ID`, so the session ID goes straight into the pin list.
+- The command prints a marker (`sweep-pin:v1:<uuid>`). Command output is written into the session file, and before deleting, Sweep searches the file for markers in the pin list. This is how Codex conversations are recognized.
 
-## 命令行
+Only markers registered in the pin list count, so the prefix appearing in docs or source code never pins anything by accident.
 
 ```bash
-sweep scan [--all] [--tight]    # 只扫描，列出会清理什么
-sweep scan --timing             # 各规则扫描耗时
-sweep run [--dry-run] [--tight] # 立即清理
-sweep status                    # 状态
-sweep refs                      # 被外部引用的项目路径
-sweep storage                   # 整块硬盘的占用和每块能不能删
-sweep arm | disarm              # 开启 / 关闭自动清理
+sweep pins                 # list pinned conversations
+sweep unkeep "label"       # unpin
 ```
 
-设置 `SWEEP_HOME=/某个目录` 可以把所有路径指向另一个目录，用来演练而不碰真实数据。
+## Full disk usage
 
-## 文件位置
+The "Full disk usage" section of the panel breaks the whole disk down by area: project code, agents and developer tools, caches, app data, app containers, temporary files, your files, applications, the system, and the part that can't be measured. Each area shows its size, how much of it Sweep can clean, and whether it can be deleted and how to deal with it.
 
-| 内容 | 路径 |
+Measuring the whole home folder takes two to three minutes, so it runs in the background after a scan and is cached for 6 hours. You can also click Refresh or run `sweep storage`. "Can't be measured" is used space minus everything that could be measured — mostly system-protected folders such as WeChat, browsers, Mail, the Photos library and the Trash.
+
+## Command line
+
+```bash
+sweep scan [--all] [--tight]    # scan only and list what would be cleaned
+sweep scan --timing             # time each rule's scan
+sweep run [--dry-run] [--tight] # clean now
+sweep status                    # status
+sweep refs                      # project paths referenced from outside
+sweep storage                   # full disk usage and what can be deleted
+sweep arm | disarm              # turn automatic cleanup on / off
+```
+
+Set `SWEEP_HOME=/some/dir` to point every path at another directory, for rehearsals that never touch real data.
+
+## File locations
+
+| Content | Path |
 |---|---|
-| 配置、标记名单、运行状态、上次扫描结果 | `~/Library/Application Support/Sweep/` |
-| 清理日志（每次删了什么、多大、为什么） | `~/Library/Logs/Sweep/sweep.log` |
-| 定时任务的输出 | `~/Library/Logs/Sweep/launchd.log` |
+| Settings, pin list, run state, last scan results | `~/Library/Application Support/Sweep/` |
+| Cleanup log (what was deleted, how big, and why) | `~/Library/Logs/Sweep/sweep.log` |
+| Scheduled-job output | `~/Library/Logs/Sweep/launchd.log` |
 
-## 已知限制
+## Known limitations
 
-- **Codex 的索引库不会被清理。** `~/.codex/state_5.sqlite` 记录了每个会话文件的路径，`thread_history_1.sqlite` 存着会话内容的另一份投影（约 7G）。Sweep 只删会话文件，不动这两个库。
-- **体积是估算。** 能识别硬链接，但识别不了 APFS 的克隆文件；实际释放量可能低于显示值。
-- **读不到受系统保护的目录。** 微信、Chrome 配置、邮件、废纸篓等需要「完全磁盘访问权限」，Sweep 不涉及这些。
-- **只在本用户的图形会话里运行。** 定时任务是用户级 LaunchAgent，没登录时不会跑。
+- **Codex's index databases are not cleaned.** `~/.codex/state_5.sqlite` records each session file's path, and `thread_history_1.sqlite` holds another projection of the conversation contents (about 7 GB). Sweep only deletes session files and never touches these databases.
+- **Sizes are estimates.** Hard links are handled, but APFS clones can't be detected, so the space actually freed may be less than shown.
+- **System-protected folders can't be read.** WeChat, Chrome profiles, Mail, the Trash and similar require Full Disk Access; Sweep doesn't touch them.
+- **Runs only in your own graphical session.** The scheduled job is a per-user LaunchAgent and doesn't run while you're logged out.
 
-## 开发
+## Development
 
 ```bash
-swift test                                                       # 全部测试
-.build/release/SweepApp --snapshot out.png --open conversations  # 把面板内容离屏渲染成图片（不含玻璃外壳）
-SWEEP_DEBUG_FRAME=frame.txt .build/release/SweepApp --show-panel # 固定显示真实面板并写出窗口位置，供截屏核对
+swift test                                                       # all tests
+.build/release/SweepApp --snapshot out.png --open conversations  # render the panel offscreen to an image (without the glass window)
+SWEEP_DEBUG_FRAME=frame.txt .build/release/SweepApp --show-panel # keep the real panel open and write its frame, for screenshots
 ```
