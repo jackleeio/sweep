@@ -20,7 +20,7 @@ sweep scan                 # 只读扫描，验证规则在真实数据上的结
   ```
 
   新功能升次版本号（0.2.0 → 0.3.0），只有修复升修订号（0.2.0 → 0.2.1）。发版说明用中文，写给使用者看：这版能做什么、改了什么、需要注意什么。
-- 仓库：<https://github.com/jackleeio/sweep>（私有）。
+- 仓库：<https://github.com/jackleeio/sweep>。
 
 ## 结构
 
