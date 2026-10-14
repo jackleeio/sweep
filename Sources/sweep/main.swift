@@ -33,7 +33,8 @@ func stamp(_ date: Date) -> String {
 func scan() throws {
     let config = try Config.load(from: env.configFile)
     let tight = args.contains("--tight")
-    let scanner = Scanner(config: config, env: env, pins: pins, tight: tight)
+    // 关着的规则也量出来（只展示，不会清理），这样菜单栏面板每一行都有真实数据
+    let scanner = Scanner(config: config, env: env, pins: pins, tight: tight, includeDisabled: true)
     if args.contains("--timing") {
         for rule in RuleID.allCases {
             let start = Date()
@@ -46,9 +47,10 @@ func scan() throws {
     // 存一份摘要和完整清单，菜单栏 app 会直接读取（收紧模式的预览不存，以免误导）
     if !tight {
         try? ScanSummary.make(from: candidates, date: env.now).save(to: env.scanFile)
-        try? ReportText.scan(candidates, limitPerRule: nil).write(to: env.previewFile, atomically: true, encoding: .utf8)
+        try? ReportText.scan(candidates, limitPerRule: nil, disabled: config.disabledRules)
+            .write(to: env.previewFile, atomically: true, encoding: .utf8)
     }
-    print(ReportText.scan(candidates, limitPerRule: args.contains("--all") ? nil : 15))
+    print(ReportText.scan(candidates, limitPerRule: args.contains("--all") ? nil : 15, disabled: config.disabledRules))
 }
 
 func run() throws {

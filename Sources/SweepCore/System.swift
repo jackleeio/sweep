@@ -95,26 +95,34 @@ extension RuleID {
         switch self {
         case .buildCaches: return "构建缓存"
         case .dependencies: return "闲置项目的依赖"
+        case .workCopies: return "工作树和构建副本"
         case .agentTemp: return "Agent 临时目录"
-        case .conversations: return "Agent 对话"
+        case .conversations: return "Codex 对话"
+        case .claudeConversations: return "Claude 对话"
         case .packageCaches: return "包与工具缓存"
         case .appCaches: return "应用缓存"
         case .artifacts: return "Agent 产物"
-        case .workCopies: return "工作副本"
+        case .recordings: return "语音输入的录音"
+        case .bigItems: return "其他大户"
         }
     }
 }
 
 public enum ReportText {
     /// 把扫描结果排成可读的清单。limitPerRule 为 nil 时不截断。
-    public static func scan(_ candidates: [Candidate], limitPerRule: Int? = 15) -> String {
+    /// disabled 里的规则照常列出（让人看得到那里有多少），但标明不会清理，也不计入合计。
+    public static func scan(_ candidates: [Candidate], limitPerRule: Int? = 15, disabled: Set<RuleID> = []) -> String {
         var lines: [String] = []
         for rule in RuleID.allCases {
             let items = candidates.filter { $0.rule == rule }
             guard !items.isEmpty else { continue }
 
             let deletable = items.filter(\.isDelete).sorted { $0.bytes > $1.bytes }
-            lines.append("\(rule.title) — 可清理 \(deletable.count) 项，\(Format.bytes(total(deletable)))")
+            if disabled.contains(rule) {
+                lines.append("\(rule.title)（已关闭，不会清理）— 打开后可清理 \(deletable.count) 项，\(Format.bytes(total(deletable)))")
+            } else {
+                lines.append("\(rule.title) — 可清理 \(deletable.count) 项，\(Format.bytes(total(deletable)))")
+            }
             let shown = limitPerRule.map { Array(deletable.prefix($0)) } ?? deletable
             for item in shown { lines.append(row(item)) }
             if shown.count < deletable.count {
@@ -131,7 +139,7 @@ public enum ReportText {
             }
             lines.append("")
         }
-        let all = candidates.filter(\.isDelete)
+        let all = candidates.filter { $0.isDelete && !disabled.contains($0.rule) }
         lines.append("合计可清理 \(all.count) 项，\(Format.bytes(total(all)))")
         return lines.joined(separator: "\n")
     }
@@ -173,6 +181,15 @@ public struct KeptGroup: Codable, Equatable {
     public var bytes: Int64
 }
 
+/// 界面上的一行分组：同一类的项合在一起显示数量和体积。
+public struct SummaryGroup: Codable, Equatable {
+    public var label: String
+    public var count: Int
+    public var bytes: Int64
+    /// 这一组是会被清理的，还是保留的。
+    public var deletable: Bool
+}
+
 public struct RuleSummary: Codable, Equatable {
     public var deletableCount: Int
     public var deletableBytes: Int64
@@ -182,6 +199,8 @@ public struct RuleSummary: Codable, Equatable {
     public var top: [ScanItem] = []
     /// 保留的项按原因分组。
     public var kept: [KeptGroup] = []
+    /// 全部命中项按类别分组：先列会清理的，再列保留的，各自按体积从大到小。
+    public var groups: [SummaryGroup] = []
 
     public init(deletableCount: Int = 0, deletableBytes: Int64 = 0, keptCount: Int = 0, keptBytes: Int64 = 0) {
         self.deletableCount = deletableCount
@@ -199,6 +218,7 @@ public struct RuleSummary: Codable, Equatable {
         keptBytes = try c.decode(Int64.self, forKey: .keptBytes)
         top = try c.decodeIfPresent([ScanItem].self, forKey: .top) ?? []
         kept = try c.decodeIfPresent([KeptGroup].self, forKey: .kept) ?? []
+        groups = try c.decodeIfPresent([SummaryGroup].self, forKey: .groups) ?? []
     }
 }
 
@@ -209,6 +229,10 @@ public struct ScanSummary: Codable, Equatable {
 
     public subscript(rule: RuleID) -> RuleSummary? { rules[rule.rawValue] }
     public var deletableBytes: Int64 { rules.values.reduce(0) { $0 + $1.deletableBytes } }
+    /// 只统计给定规则里可清理的量。界面用它来排除关着的规则。
+    public func deletable(in wanted: Set<RuleID>) -> (count: Int, bytes: Int64) {
+        wanted.compactMap { rules[$0.rawValue] }.reduce((0, Int64(0))) { ($0.0 + $1.deletableCount, $0.1 + $1.deletableBytes) }
+    }
     public var deletableCount: Int { rules.values.reduce(0) { $0 + $1.deletableCount } }
 
     private static let topCount = 8
@@ -224,6 +248,13 @@ public struct ScanSummary: Codable, Equatable {
             entry.kept = Dictionary(grouping: kept, by: \.reason)
                 .map { KeptGroup(reason: $0.key, count: $0.value.count, bytes: $0.value.reduce(0) { $0 + $1.bytes }) }
                 .sorted { ($0.bytes, $1.reason) > ($1.bytes, $0.reason) }
+            // 有类别标签的按标签分；没有的，保留项按原因分，可清理项合成一行
+            func grouped(_ list: [Candidate], deletable: Bool) -> [SummaryGroup] {
+                Dictionary(grouping: list) { $0.category ?? (deletable ? "可清理" : $0.reason) }
+                    .map { SummaryGroup(label: $0.key, count: $0.value.count, bytes: $0.value.reduce(0) { $0 + $1.bytes }, deletable: deletable) }
+                    .sorted { ($0.bytes, $1.label) > ($1.bytes, $0.label) }
+            }
+            entry.groups = grouped(deletable, deletable: true) + grouped(kept, deletable: false)
             rules[rule.rawValue] = entry
         }
         return ScanSummary(date: date, rules: rules)
@@ -251,11 +282,18 @@ extension RuleID {
         case .buildCaches:
             return "项目里的 .next、bun 编译残留和 Tauri 的 target。\(idle)没更新，或单个超过 \(Format.number(config.buildCaches.sizeCapGB)) GB 时清理，下次构建会重新生成。"
         case .dependencies:
-            return "闲置项目的 node_modules 和能重建的虚拟环境。项目 \(Format.number(config.dependencies.idleDays)) 天没有改动时清理，回到项目后重新安装即可。"
+            return "闲置项目的 node_modules 和能重建的虚拟环境。项目 \(Format.number(config.dependencies.idleDays)) 天没有改动时清理，回到项目后重新安装即可。被全局命令、技能、定时任务用到的项目不清。"
+        case .workCopies:
+            let rule = config.workCopies.enabled
+                ? "干净、\(Format.number(config.workCopies.idleDays)) 天没动、提交都在分支上的 git 工作树会被移除，分支保留。"
+                : "目前只显示体积。打开后，干净、\(Format.number(config.workCopies.idleDays)) 天没动的 git 工作树会被移除，分支保留。"
+            return "worktree 和构建副本。\(rule)不是 git 工作树的普通副本永远只展示。"
         case .agentTemp:
             return "Agent 构建时建的临时目录（~/.cache/bnbot-* 等）。\(idle)没更新时清理。"
         case .conversations:
-            return "Codex 和 Claude 的会话记录。\(idle)没更新且没有标记时删除，删除后无法恢复。"
+            return "Codex 的会话记录。\(Format.number(config.conversations.idleDays)) 天没更新就删除，删除后无法恢复。你在 Codex 里 pin 的、置顶项目里的、用 sweep keep 标记的都不删；已归档的安静 \(idle)就删；子 agent 的会话跟随所属对话。"
+        case .claudeConversations:
+            return "Claude Code 的会话记录，不含记忆目录。\(Format.number(config.claudeConversations.idleDays)) 天没更新且没有用 sweep keep 标记时删除，删除后无法恢复。"
         case .packageCaches:
             return "Yarn、npm、pnpm、bun、uv、pip 的下载缓存和 Docker Scout。合计超过 \(Format.number(config.packageCaches.totalCapGB)) GB 时清空，之后按需重新下载。"
         case .appCaches:
@@ -263,8 +301,10 @@ extension RuleID {
             return "~/Library/Caches 里其他应用的缓存。\(idle)没更新时清理；\(kept)。"
         case .artifacts:
             return "Codex 生成的图片和视频。\(Format.number(config.artifacts.idleDays)) 天没更新时删除，删除后无法恢复。"
-        case .workCopies:
-            return "worktree 和构建副本，里面可能有未提交的代码，所以只显示体积，不自动清理。"
+        case .recordings:
+            return "闪电说保存的历史录音。\(Format.number(config.recordings.idleDays)) 天前的删除；转写出来的文字不受影响，只是旧条目不能再回放。"
+        case .bigItems:
+            return "体积大、但不能靠删文件来清理的东西。列在这里只是让你看得见，Sweep 不会动它们。"
         }
     }
 }

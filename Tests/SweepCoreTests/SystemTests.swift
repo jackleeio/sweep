@@ -91,7 +91,7 @@ final class ReportTextTests: XCTestCase {
         XCTAssertTrue(text.contains("/p/app/.next"))
         XCTAssertTrue(text.contains("2.0 GB"))
         XCTAssertTrue(text.contains("9 天没更新"))
-        XCTAssertTrue(text.contains("Agent 对话"))
+        XCTAssertTrue(text.contains("Codex 对话"))
     }
 
     func testShowsWhyProtectedItemsAreKept() {

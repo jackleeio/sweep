@@ -85,6 +85,20 @@ public final class PinStore {
         return removed
     }
 
+    /// 把标记串对应的会话 ID 记下来。之后即使会话文件被压缩、搜不到标记串，也能按 ID 认出它。
+    public func bind(_ sessionIDs: [String: String]) throws {
+        guard !sessionIDs.isEmpty else { return }
+        var pins = try all()
+        var changed = false
+        for i in pins.indices where pins[i].sessionID == nil {
+            if let id = sessionIDs[pins[i].token] {
+                pins[i].sessionID = id
+                changed = true
+            }
+        }
+        if changed { try JSONFiles.write(pins, to: file) }
+    }
+
     public func match(file: URL, sessionID: String?) throws -> Pin? {
         Self.match(pins: try all(), file: file, sessionID: sessionID)
     }

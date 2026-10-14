@@ -14,6 +14,10 @@ final class ExtendedConfigTests: XCTestCase {
         XCTAssertEqual(c.targetFreeGB, 300)
         XCTAssertTrue(c.dependencies.enabled)
         XCTAssertEqual(c.dependencies.idleDays, 14)
+        XCTAssertEqual(c.conversations.idleDays, 7)
+        XCTAssertEqual(c.claudeConversations.idleDays, 7)
+        XCTAssertEqual(c.recordings.idleDays, 7)
+        XCTAssertFalse(c.workCopies.enabled)
         XCTAssertTrue(c.appCaches.enabled)
         XCTAssertEqual(c.excludes, [])
         XCTAssertTrue(c.packageCaches.paths.contains("~/.bun/install/cache"))
@@ -445,13 +449,13 @@ final class BuiltInListTests: XCTestCase {
         let h = TempHome()
         var c = Config()
         c.packageCaches.extraPaths = ["~/.cache/huggingface"]
-        c.conversations.extraClaudeRoots = ["~/.bnbot/projects"]
+        c.claudeConversations.extraClaudeRoots = ["~/.bnbot/projects"]
         c.appCaches.extraSkipPrefixes = ["com.example.keep"]
         try c.save(to: h.path("config.json"))
         let loaded = try Config.load(from: h.path("config.json"))
         XCTAssertTrue(loaded.packageCaches.paths.contains("~/.cache/huggingface"))
         XCTAssertTrue(loaded.packageCaches.paths.contains("~/.npm/_cacache"))
-        XCTAssertEqual(loaded.conversations.claudeRoots, ["~/.claude/projects", "~/.bnbot/projects"])
+        XCTAssertEqual(loaded.claudeConversations.claudeRoots, ["~/.claude/projects", "~/.bnbot/projects"])
         XCTAssertTrue(loaded.appCaches.skipPrefixes.contains("com.example.keep"))
         XCTAssertTrue(loaded.appCaches.skipPrefixes.contains("com.apple."))
     }

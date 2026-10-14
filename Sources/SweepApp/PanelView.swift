@@ -2,7 +2,7 @@ import SweepCore
 import SwiftUI
 
 struct PanelView: View {
-    /// 面板里可以展开的区块。同一时间只展开一个，保证面板高度可控。
+    /// 面板里可以展开的区块。同一时间只展开一个。
     enum Section: Hashable {
         case rule(RuleID)
         case pins
@@ -13,36 +13,49 @@ struct PanelView: View {
     @EnvironmentObject private var model: AppModel
     @State private var open: Section?
 
-    private static let rules: [RuleID] = [.buildCaches, .dependencies, .packageCaches, .appCaches, .agentTemp, .conversations, .artifacts]
-    private static let shownItems = 6
+    private static let rules: [RuleID] = [.buildCaches, .dependencies, .workCopies, .packageCaches, .appCaches, .agentTemp,
+                                          .conversations, .claudeConversations, .artifacts, .recordings, .bigItems]
+    private static let shownItems = 5
 
     init(open: Section? = nil) {
         _open = State(initialValue: open)
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            header
-            Divider()
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(Self.rules, id: \.self) { ruleRow($0, toggleable: true) }
-                ruleRow(.workCopies, toggleable: false)
-                Text(scanCaption).font(.caption).foregroundStyle(.secondary)
+        // 规则多、又能展开，内容可能比屏幕高：超过上限时滚动
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                header
+                Divider()
+                VStack(alignment: .leading, spacing: 5) {
+                    ForEach(Self.rules, id: \.self) { ruleRow($0) }
+                    Text(scanCaption).font(.caption).foregroundStyle(.secondary).padding(.top, 2)
+                }
+                notices
+                Divider()
+                sectionHeader("已标记的对话", count: model.pins.count, section: .pins)
+                if open == .pins { pinList }
+                sectionHeader("清理记录", count: model.state.history.count, section: .history)
+                if open == .history { historyList }
+                sectionHeader("设置", count: nil, section: .settings)
+                if open == .settings { settings }
+                Divider()
+                footer
             }
-            notices
-            Divider()
-            sectionHeader("已标记的对话", count: model.pins.count, section: .pins)
-            if open == .pins { pinList }
-            sectionHeader("清理记录", count: model.state.history.count, section: .history)
-            if open == .history { historyList }
-            sectionHeader("设置", count: nil, section: .settings)
-            if open == .settings { settings }
-            Divider()
-            footer
+            .padding(14)
         }
-        .padding(14)
-        .frame(width: 400)
+        .frame(width: 420)
+        .frame(maxHeight: Self.maxHeight)
+        .fixedSize(horizontal: false, vertical: true)
+        .background(GeometryReader { proxy in
+            Color.clear.preference(key: PanelHeightKey.self, value: proxy.size.height)
+        })
+        .onPreferenceChange(PanelHeightKey.self) { model.panelHeight = $0 }
         .onAppear { model.refresh() }
+    }
+
+    private static var maxHeight: CGFloat {
+        max(480, (NSScreen.main?.visibleFrame.height ?? 900) - 40)
     }
 
     private func toggle(_ section: Section) {
@@ -58,6 +71,7 @@ struct PanelView: View {
                 Spacer()
                 if model.busy != .idle { ProgressView().controlSize(.small) }
                 Button(model.busy == .scanning ? "扫描中…" : "重新扫描") { model.scan() }
+                    .glassButton()
                     .disabled(model.busy != .idle || model.configError != nil)
             }
             ProgressView(value: model.total > 0 ? Double(model.total - model.free) / Double(model.total) : 0)
@@ -67,8 +81,8 @@ struct PanelView: View {
                 Text("/ \(Format.bytes(model.total))").foregroundStyle(.secondary).monospacedDigit()
                 Spacer()
                 // 差不到 1 GB 时这个数字和「可用」一样，显示出来只会添乱
-                if let summary = model.summary, summary.deletableBytes >= Int64(Format.gigabyte) {
-                    Text("清理后约 \(Format.bytes(model.free + summary.deletableBytes))")
+                if model.cleanable.bytes >= Int64(Format.gigabyte) {
+                    Text("清理后约 \(Format.bytes(model.free + model.cleanable.bytes))")
                         .foregroundStyle(.secondary).monospacedDigit()
                 }
             }
@@ -125,27 +139,34 @@ struct PanelView: View {
 
     // MARK: - 规则列表
 
-    private func ruleRow(_ rule: RuleID, toggleable: Bool) -> some View {
+    /// 「工作树」关着时仍然列出体积，「其他大户」根本没有开关：这两条始终显示内容。
+    private func alwaysListed(_ rule: RuleID) -> Bool { rule == .workCopies || rule == .bigItems }
+
+    private func ruleRow(_ rule: RuleID) -> some View {
         let summary = model.summary?[rule]
         let enabled = model.isEnabled(rule)
+        let listed = enabled || alwaysListed(rule)
         return VStack(alignment: .leading, spacing: 3) {
             HStack(spacing: 6) {
-                if toggleable {
+                if rule == .bigItems {
+                    Image(systemName: "eye").font(.caption).foregroundStyle(.secondary).frame(width: 16)
+                } else {
                     Toggle("", isOn: Binding(get: { enabled }, set: { model.setEnabled(rule, $0) }))
                         .toggleStyle(.checkbox)
                         .labelsHidden()
-                } else {
-                    Image(systemName: "eye").font(.caption).foregroundStyle(.secondary).frame(width: 16)
                 }
                 Button {
                     toggle(.rule(rule))
                 } label: {
-                    HStack {
-                        Text(rule.title).foregroundStyle(enabled ? Color.primary : Color.secondary)
-                        Spacer()
+                    HStack(spacing: 6) {
+                        Text(rule.title).foregroundStyle(listed ? Color.primary : Color.secondary).layoutPriority(2)
+                        Text(countText(rule, summary, enabled: enabled))
+                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        Spacer(minLength: 4)
                         Text(sizeText(rule, summary, enabled: enabled))
-                            .monospacedDigit()
+                            .monospacedDigit().layoutPriority(1)
                             .foregroundStyle(enabled && (summary?.deletableBytes ?? 0) > 0 ? Color.primary : Color.secondary)
+                            .strikethrough(!enabled && rule != .bigItems && (summary?.deletableBytes ?? 0) > 0, color: .secondary)
                         Image(systemName: open == .rule(rule) ? "chevron.down" : "chevron.right")
                             .font(.caption2).foregroundStyle(.tertiary).frame(width: 10)
                     }
@@ -154,26 +175,24 @@ struct PanelView: View {
                 .buttonStyle(.plain)
             }
             .font(.callout)
-            Text(countText(rule, summary, enabled: enabled))
-                .font(.caption).foregroundStyle(.secondary).padding(.leading, 22)
             if open == .rule(rule) {
-                ruleDetail(rule, summary).padding(.leading, 22).padding(.top, 2)
+                ruleDetail(rule, summary).padding(.leading, 22).padding(.bottom, 4)
             }
         }
     }
 
+    /// 右侧的体积：开着的规则是「会清多少」，关着的是「打开后能清多少」，大户是它一共占多少。
     private func sizeText(_ rule: RuleID, _ summary: RuleSummary?, enabled: Bool) -> String {
-        guard enabled else { return "已关闭" }
         guard let summary else { return model.summary == nil ? "—" : "0 B" }
-        return Format.bytes(rule == .workCopies ? summary.keptBytes : summary.deletableBytes)
+        return Format.bytes(rule == .bigItems ? summary.keptBytes : summary.deletableBytes)
     }
 
     private func countText(_ rule: RuleID, _ summary: RuleSummary?, enabled: Bool) -> String {
-        guard enabled else { return "已关闭，不会清理" }
-        guard let summary else { return model.summary == nil ? "还没有扫描" : "没有命中任何内容" }
-        if rule == .workCopies { return "\(summary.keptCount) 个，只显示体积，不自动清理" }
-        let kept = summary.keptCount > 0 ? " · 保留 \(summary.keptCount) 项（\(Format.bytes(summary.keptBytes))）" : ""
-        return "可清 \(summary.deletableCount) 项\(kept)"
+        guard let summary else { return model.summary == nil ? "未扫描" : (enabled ? "无" : "已关闭") }
+        if rule == .bigItems { return "\(summary.keptCount) 项，仅展示" }
+        let kept = summary.keptCount > 0 ? " · 留 \(summary.keptCount)" : ""
+        // 关着的规则也量过了：数字是真实的，只是不会清
+        return enabled ? "清 \(summary.deletableCount)\(kept)" : "已关闭 · 打开可清 \(summary.deletableCount)"
     }
 
     private func ruleDetail(_ rule: RuleID, _ summary: RuleSummary?) -> some View {
@@ -182,22 +201,36 @@ struct PanelView: View {
                 .font(.caption).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if let summary {
-                ForEach(summary.top.prefix(Self.shownItems), id: \.path) { item in
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text(Format.bytes(item.bytes)).monospacedDigit().frame(width: 58, alignment: .trailing)
-                        Text(shortPath(item.path)).lineLimit(1).truncationMode(.middle).layoutPriority(1)
+                // 分类：这一类有多少、占多大、会清还是会留
+                ForEach(summary.groups, id: \.self.label) { group in
+                    HStack(spacing: 6) {
+                        Text(group.deletable ? "清" : "留")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(group.deletable ? Color.orange : Color.secondary)
+                            .frame(width: 14)
+                        Text(group.label).lineLimit(1).truncationMode(.tail)
                         Spacer(minLength: 4)
-                        Text(item.reason).foregroundStyle(.secondary).lineLimit(1).frame(maxWidth: 104, alignment: .trailing)
+                        Text("\(group.count) 项").foregroundStyle(.secondary).monospacedDigit()
+                        Text(Format.bytes(group.bytes)).monospacedDigit().frame(width: 62, alignment: .trailing)
                     }
                     .font(.caption)
                 }
-                if summary.deletableCount > Self.shownItems {
-                    Text("… 共 \(summary.deletableCount) 项，点下方「清单」看全部").font(.caption).foregroundStyle(.tertiary)
-                }
-                ForEach(summary.kept, id: \.reason) { group in
-                    Text("保留 \(group.count) 项 · \(Format.bytes(group.bytes)) · \(group.reason)")
-                        .font(.caption).foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                if !summary.top.isEmpty {
+                    Text("其中最大的").font(.caption2).foregroundStyle(.tertiary).padding(.top, 2)
+                    ForEach(summary.top.prefix(Self.shownItems), id: \.path) { item in
+                        HStack(alignment: .firstTextBaseline, spacing: 6) {
+                            Text(Format.bytes(item.bytes)).monospacedDigit().frame(width: 58, alignment: .trailing)
+                            // 路径可以被压缩，右边的原因固定留出位置
+                            Text(shortPath(item.path)).lineLimit(1).truncationMode(.middle)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            Text(item.reason).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+                                .frame(width: 92, alignment: .trailing)
+                        }
+                        .font(.caption)
+                    }
+                    if summary.deletableCount > Self.shownItems {
+                        Text("… 共 \(summary.deletableCount) 项，点下方「清单」看全部").font(.caption).foregroundStyle(.tertiary)
+                    }
                 }
             }
         }
@@ -216,7 +249,8 @@ struct PanelView: View {
         guard let summary = model.summary else { return "还没有扫描过，点右上角「重新扫描」查看可清理的内容。" }
         let formatter = DateFormatter()
         formatter.dateFormat = "M 月 d 日 HH:mm"
-        return "扫描于 \(formatter.string(from: summary.date)) · 合计可清理 \(summary.deletableCount) 项，\(Format.bytes(summary.deletableBytes))"
+        let total = model.cleanable
+        return "扫描于 \(formatter.string(from: summary.date)) · 开着的规则合计可清理 \(total.count) 项，\(Format.bytes(total.bytes))"
     }
 
     @ViewBuilder
@@ -253,11 +287,9 @@ struct PanelView: View {
 
     private var pinList: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if model.pins.isEmpty {
-                Text("在对话里对 agent 说「标记这个对话，别删」，它就会出现在这里。")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            Text("这里是用 sweep keep 标记的对话。你在 Codex 里 pin 的对话也会自动保留，见「Codex 对话」。")
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             ForEach(model.pins, id: \.token) { pin in
                 HStack {
                     VStack(alignment: .leading, spacing: 1) {
@@ -279,7 +311,7 @@ struct PanelView: View {
         let recent = Array(model.state.history.suffix(6).reversed().enumerated())
         return VStack(alignment: .leading, spacing: 4) {
             if recent.isEmpty {
-                Text("还没有清理记录。").font(.caption).foregroundStyle(.secondary)
+                Text("还没有通过 Sweep 清理过。").font(.caption).foregroundStyle(.secondary)
             }
             ForEach(recent, id: \.offset) { _, record in
                 HStack(spacing: 6) {
@@ -311,10 +343,21 @@ struct PanelView: View {
 
     private var settings: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Stepper("缓存和对话闲置 \(Format.number(model.config.idleDays)) 天后清理",
+            Stepper("缓存闲置 \(Format.number(model.config.idleDays)) 天后清理",
                     value: configBinding(\.idleDays), in: 1...30)
-            Stepper("项目闲置 \(Format.number(model.config.dependencies.idleDays)) 天后清它的依赖",
-                    value: configBinding(\.dependencies.idleDays), in: 3...90)
+            Stepper("对话闲置 \(Format.number(model.config.conversations.idleDays)) 天后删除",
+                    value: Binding(get: { model.config.conversations.idleDays }, set: {
+                        // 两种对话共用一个门槛，界面上只留一个旋钮
+                        model.config.conversations.idleDays = $0
+                        model.config.claudeConversations.idleDays = $0
+                        model.saveConfig()
+                    }), in: 3...90)
+            Stepper("项目或工作树闲置 \(Format.number(model.config.dependencies.idleDays)) 天后清理",
+                    value: Binding(get: { model.config.dependencies.idleDays }, set: {
+                        model.config.dependencies.idleDays = $0
+                        model.config.workCopies.idleDays = $0
+                        model.saveConfig()
+                    }), in: 3...90)
             Stepper("单个构建缓存上限 \(Format.number(model.config.buildCaches.sizeCapGB)) GB",
                     value: configBinding(\.buildCaches.sizeCapGB), in: 1...100)
             Stepper("包缓存合计上限 \(Format.number(model.config.packageCaches.totalCapGB)) GB",
@@ -343,19 +386,20 @@ struct PanelView: View {
 
     @ViewBuilder
     private var footer: some View {
-        if model.confirming, let summary = model.summary {
+        if model.confirming {
+            let total = model.cleanable
             VStack(alignment: .leading, spacing: 8) {
-                Text("将清理 \(summary.deletableCount) 项，共 \(Format.bytes(summary.deletableBytes))。删除后无法恢复。"
+                Text("将清理 \(total.count) 项，共 \(Format.bytes(total.bytes))。删除后无法恢复。"
                      + (model.state.armed ? "" : "确认后同时开启自动清理。"))
                     .font(.callout)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack {
-                    Button("查看清单") { model.openPreview() }
+                    Button("查看清单") { model.openPreview() }.glassButton()
                     Spacer()
-                    Button("取消") { model.confirming = false }
+                    Button("取消") { model.confirming = false }.glassButton()
                     Button("确认清理") { model.confirmClean() }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(summary.deletableCount == 0)
+                        .glassButton(prominent: true)
+                        .disabled(total.count == 0)
                 }
             }
         } else {
@@ -366,14 +410,31 @@ struct PanelView: View {
                 }
                 HStack {
                     Button(model.busy == .cleaning ? "清理中…" : "立即清理") { model.requestClean() }
-                        .buttonStyle(.borderedProminent)
+                        .glassButton(prominent: true)
                         .disabled(model.busy != .idle || model.configError != nil)
-                    Button("清单") { model.openPreview() }.disabled(model.busy != .idle)
-                    Button("日志") { model.openLog() }
+                    Button("清单") { model.openPreview() }.glassButton().disabled(model.busy != .idle)
+                    Button("日志") { model.openLog() }.glassButton()
                     Spacer()
-                    Button("退出") { NSApplication.shared.terminate(nil) }
+                    Button("退出") { NSApplication.shared.terminate(nil) }.glassButton()
                 }
             }
+        }
+    }
+}
+
+struct PanelHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
+}
+
+extension View {
+    /// macOS 26 起用液态玻璃样式的按钮，更早的系统退回普通的带边框按钮。
+    @ViewBuilder
+    func glassButton(prominent: Bool = false) -> some View {
+        if #available(macOS 26.0, *) {
+            if prominent { buttonStyle(.glassProminent) } else { buttonStyle(.glass) }
+        } else {
+            if prominent { buttonStyle(.borderedProminent) } else { buttonStyle(.bordered) }
         }
     }
 }

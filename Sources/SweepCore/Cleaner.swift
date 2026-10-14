@@ -22,7 +22,7 @@ public struct Cleaner {
     let env: Env
 
     /// 这些规则删完后会顺手清掉因此变空的上级目录（如 Codex 的日期目录）。
-    private static let prunedRules: Set<RuleID> = [.conversations, .artifacts]
+    private static let prunedRules: Set<RuleID> = [.conversations, .claudeConversations, .artifacts]
     private static let maxLogBytes: Int64 = 5 << 20
 
     public init(env: Env) { self.env = env }
@@ -64,6 +64,10 @@ public struct Cleaner {
                 }
                 if Self.prunedRules.contains(candidate.rule) {
                     pruneEmptyParents(of: candidate.url, upTo: candidate.root)
+                }
+                if case .pruneWorktrees(let main)? = candidate.postDelete {
+                    // 工作树的目录已经删了，让主仓库把对它的登记也清掉
+                    _ = Git.output(["-C", main.path, "worktree", "prune"])
                 }
             }
 
@@ -215,8 +219,8 @@ public struct TickOutcome {
 public struct Runner {
     let env: Env
 
-    /// 定时运行和手动清理都不碰工作副本（它只用于展示）。
-    private static let cleanedRules = Set(RuleID.allCases).subtracting([.workCopies])
+    /// 「其他大户」只用于展示，不参与任何清理。
+    private static let cleanedRules = Set(RuleID.allCases).subtracting([.bigItems])
     /// 两次收紧清理之间至少间隔这么久，避免空间持续不足时反复扫描。
     private static let tightInterval: TimeInterval = 3600
     private static let noticeInterval: TimeInterval = 24 * 3600

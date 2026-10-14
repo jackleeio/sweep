@@ -52,20 +52,52 @@ public struct Config: Codable, Equatable {
         }
     }
 
+    /// Codex 的对话。
     public struct Conversations: Codable, Equatable {
         public static let builtinCodexRoots = ["~/.codex/sessions", "~/.codex/archived_sessions"]
+        public var enabled = true
+        /// 多少天没更新就删除。归档过的对话不看这个值，安静 3 天即删。
+        public var idleDays: Double = 7
+        public var extraCodexRoots: [String] = []
+        public var codexRoots: [String] { Self.builtinCodexRoots + extraCodexRoots }
+        public init() {}
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            enabled = try c.value(.enabled, default: true)
+            idleDays = try c.value(.idleDays, default: 7)
+            extraCodexRoots = try c.value(.extraCodexRoots, default: [])
+        }
+    }
+
+    /// Claude Code 的对话。
+    public struct ClaudeConversations: Codable, Equatable {
         public static let builtinClaudeRoots = ["~/.claude/projects"]
         public var enabled = true
-        public var extraCodexRoots: [String] = []
+        public var idleDays: Double = 7
         public var extraClaudeRoots: [String] = []
-        public var codexRoots: [String] { Self.builtinCodexRoots + extraCodexRoots }
         public var claudeRoots: [String] { Self.builtinClaudeRoots + extraClaudeRoots }
         public init() {}
         public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
             enabled = try c.value(.enabled, default: true)
-            extraCodexRoots = try c.value(.extraCodexRoots, default: [])
+            idleDays = try c.value(.idleDays, default: 7)
             extraClaudeRoots = try c.value(.extraClaudeRoots, default: [])
+        }
+    }
+
+    /// 语音输入工具留下的历史录音。
+    public struct Recordings: Codable, Equatable {
+        public static let builtinPaths = ["~/Library/Application Support/Shandianshuo/workspace/history/recordings"]
+        public var enabled = true
+        public var idleDays: Double = 7
+        public var extraPaths: [String] = []
+        public var paths: [String] { Self.builtinPaths + extraPaths }
+        public init() {}
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            enabled = try c.value(.enabled, default: true)
+            idleDays = try c.value(.idleDays, default: 7)
+            extraPaths = try c.value(.extraPaths, default: [])
         }
     }
 
@@ -142,16 +174,30 @@ public struct Config: Codable, Equatable {
         }
     }
 
-    /// 只展示体积，永不自动删除。
+    /// worktree 和构建副本。默认只展示；打开后，干净且闲置的 git 工作树会被移除（分支保留）。
     public struct WorkCopies: Codable, Equatable {
-        public static let builtinGlobs = ["~/Projects/*-worktrees/*", "~/Projects/*-build*"]
+        public static let builtinGlobs = ["~/Projects/*-worktrees/*", "~/Projects/*-build*", "~/.codex/worktrees/*/*"]
+        public var enabled = false
+        public var idleDays: Double = 14
         public var extraGlobs: [String] = []
         public var globs: [String] { Self.builtinGlobs + extraGlobs }
         public init() {}
         public init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: CodingKeys.self)
+            enabled = try c.value(.enabled, default: false)
+            idleDays = try c.value(.idleDays, default: 14)
             extraGlobs = try c.value(.extraGlobs, default: [])
         }
+    }
+
+    /// 体积大、但不能靠删文件来清理的东西。只在界面上列出，提醒它们的存在。
+    public enum BigItems {
+        public static let builtin: [(path: String, note: String)] = [
+            ("~/Library/Containers/com.docker.docker/Data/vms/0/data/Docker.raw", "Docker 的虚拟磁盘。要在 Docker 里清理悬空镜像和构建缓存，直接删会丢掉容器和数据卷"),
+            ("~/Library/Application Support/Claude/vm_bundles", "Claude 桌面版本地 agent 模式的虚拟机镜像。不用这个功能可以手动删，下次使用会重新下载"),
+            ("~/.codex/thread_history_1.sqlite", "Codex 的对话内容索引。由 Codex 自己维护，不能手工删"),
+            ("~/Library/Application Support/BNBot/CodexAppServer/logs_2.sqlite", "BNBot 内嵌 Codex 的调试日志。退出 BNBot 后可以删，会自动重建"),
+        ]
     }
 
     /// 多少天没有更新即视为不再使用。
@@ -169,6 +215,8 @@ public struct Config: Codable, Equatable {
     public var dependencies = Dependencies()
     public var agentTemp = AgentTemp()
     public var conversations = Conversations()
+    public var claudeConversations = ClaudeConversations()
+    public var recordings = Recordings()
     public var packageCaches = PackageCaches()
     public var appCaches = AppCaches()
     public var artifacts = Artifacts()
@@ -189,10 +237,34 @@ public struct Config: Codable, Equatable {
         dependencies = try c.value(.dependencies, default: d.dependencies)
         agentTemp = try c.value(.agentTemp, default: d.agentTemp)
         conversations = try c.value(.conversations, default: d.conversations)
+        claudeConversations = try c.value(.claudeConversations, default: d.claudeConversations)
+        recordings = try c.value(.recordings, default: d.recordings)
         packageCaches = try c.value(.packageCaches, default: d.packageCaches)
         appCaches = try c.value(.appCaches, default: d.appCaches)
         artifacts = try c.value(.artifacts, default: d.artifacts)
         workCopies = try c.value(.workCopies, default: d.workCopies)
+    }
+
+    /// 这条规则现在会不会真的清理东西。
+    public func isEnabled(_ rule: RuleID) -> Bool {
+        switch rule {
+        case .buildCaches: return buildCaches.enabled
+        case .dependencies: return dependencies.enabled
+        case .workCopies: return workCopies.enabled
+        case .agentTemp: return agentTemp.enabled
+        case .conversations: return conversations.enabled
+        case .claudeConversations: return claudeConversations.enabled
+        case .packageCaches: return packageCaches.enabled
+        case .appCaches: return appCaches.enabled
+        case .artifacts: return artifacts.enabled
+        case .recordings: return recordings.enabled
+        case .bigItems: return false
+        }
+    }
+
+    /// 有开关、且目前关着的规则。
+    public var disabledRules: Set<RuleID> {
+        Set(RuleID.allCases.filter { $0 != .bigItems && !isEnabled($0) })
     }
 
     /// 文件不存在时用默认值；存在但损坏时抛错，不回退到默认值，

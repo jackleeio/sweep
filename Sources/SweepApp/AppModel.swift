@@ -24,6 +24,8 @@ final class AppModel: ObservableObject {
     @Published var confirming = false
     @Published var message: String?
     @Published var launchAtLogin = false
+    /// 面板内容的高度，外壳据此调整窗口大小。
+    @Published var panelHeight: CGFloat = 0
 
     private var timer: Timer?
 
@@ -33,6 +35,7 @@ final class AppModel: ObservableObject {
         refresh()
         guard live else { return }
         enableLaunchAtLoginOnFirstRun()
+        scanIfStale()
         timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
@@ -71,10 +74,12 @@ final class AppModel: ObservableObject {
         let config = config
         Task.detached(priority: .utility) {
             let env = Env.live()
-            let candidates = Scanner(config: config, env: env, pins: PinStore(file: env.pinsFile)).scan()
+            // 关着的规则也量出来，只用于展示；真正清理时 Runner 会按开关重新扫描
+            let candidates = Scanner(config: config, env: env, pins: PinStore(file: env.pinsFile), includeDisabled: true).scan()
             let summary = ScanSummary.make(from: candidates, date: env.now)
             try? summary.save(to: env.scanFile)
-            try? ReportText.scan(candidates, limitPerRule: nil).write(to: env.previewFile, atomically: true, encoding: .utf8)
+            try? ReportText.scan(candidates, limitPerRule: nil, disabled: config.disabledRules)
+                .write(to: env.previewFile, atomically: true, encoding: .utf8)
             let blocked = candidates.filter(\.blockedByProcess).map {
                 "\($0.url.deletingLastPathComponent().lastPathComponent)/\($0.url.lastPathComponent) 已有 \(Format.bytes($0.bytes))，相关进程停掉后会清理"
             }
@@ -137,29 +142,33 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func isEnabled(_ rule: RuleID) -> Bool {
-        switch rule {
-        case .buildCaches: return config.buildCaches.enabled
-        case .agentTemp: return config.agentTemp.enabled
-        case .conversations: return config.conversations.enabled
-        case .packageCaches: return config.packageCaches.enabled
-        case .appCaches: return config.appCaches.enabled
-        case .dependencies: return config.dependencies.enabled
-        case .artifacts: return config.artifacts.enabled
-        case .workCopies: return true
-        }
+    func isEnabled(_ rule: RuleID) -> Bool { config.isEnabled(rule) }
+
+    /// 开着的规则合计能清多少。关着的规则虽然也量了，但不计入。
+    var cleanable: (count: Int, bytes: Int64) {
+        summary?.deletable(in: Set(RuleID.allCases).subtracting(config.disabledRules)) ?? (0, 0)
+    }
+
+    /// 上次扫描太久了就重新扫一遍。启动时和每次打开面板时调用，保证看到的不是过时的数字。
+    func scanIfStale(maxAge: TimeInterval = 600) {
+        guard busy == .idle else { return }
+        if let summary, Date().timeIntervalSince(summary.date) < maxAge { return }
+        scan()
     }
 
     func setEnabled(_ rule: RuleID, _ on: Bool) {
         switch rule {
         case .buildCaches: config.buildCaches.enabled = on
+        case .dependencies: config.dependencies.enabled = on
+        case .workCopies: config.workCopies.enabled = on
         case .agentTemp: config.agentTemp.enabled = on
         case .conversations: config.conversations.enabled = on
+        case .claudeConversations: config.claudeConversations.enabled = on
         case .packageCaches: config.packageCaches.enabled = on
         case .appCaches: config.appCaches.enabled = on
-        case .dependencies: config.dependencies.enabled = on
         case .artifacts: config.artifacts.enabled = on
-        case .workCopies: return
+        case .recordings: config.recordings.enabled = on
+        case .bigItems: return
         }
         saveConfig()
     }

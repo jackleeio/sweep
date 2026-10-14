@@ -238,7 +238,7 @@ final class ConfigTests: XCTestCase {
         let c = try Config.load(from: f)
         XCTAssertEqual(c.idleDays, 7)
         XCTAssertFalse(c.conversations.enabled)
-        XCTAssertEqual(c.conversations.claudeRoots, Config().conversations.claudeRoots)
+        XCTAssertEqual(c.claudeConversations.claudeRoots, Config().claudeConversations.claudeRoots)
         XCTAssertEqual(c.buildCaches.sizeCapGB, 10)
     }
 

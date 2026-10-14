@@ -8,13 +8,12 @@ private func scan(_ h: TempHome, _ rule: RuleID, config: Config = Config(),
 }
 
 final class ConversationRuleTests: XCTestCase {
-    let sid = "6c5b11d6-a94a-4a87-9f40-3bf1588a4d90"
     let rollout = ".codex/sessions/2026/10/01/rollout-2026-10-01T00-00-00-01a130dd-f6c0-71a0-8d0b-2948f138ed6c.jsonl"
 
     func testCodexSessionIdlePastThresholdIsDeletable() {
         let h = TempHome()
         h.file(rollout)
-        h.age(".codex", daysAgo: 4)
+        h.age(".codex", daysAgo: 9)
         let c = scan(h, .conversations)
         XCTAssertEqual(c.count, 1)
         XCTAssertTrue(c[0].isDelete)
@@ -47,56 +46,8 @@ final class ConversationRuleTests: XCTestCase {
     func testCodexCandidateRootIsTheConfiguredRoot() {
         let h = TempHome()
         h.file(rollout)
-        h.age(".codex", daysAgo: 4)
+        h.age(".codex", daysAgo: 9)
         XCTAssertEqual(scan(h, .conversations)[0].root.path, h.path(".codex/sessions").path)
-    }
-
-    func testClaudeSessionCandidateIncludesSiblingDirectory() {
-        let h = TempHome()
-        h.file(".claude/projects/-Users-x/\(sid).jsonl")
-        h.file(".claude/projects/-Users-x/\(sid)/tool-results/a.txt")
-        h.age(".claude", daysAgo: 5)
-        let c = scan(h, .conversations)
-        XCTAssertEqual(c.count, 1)
-        XCTAssertTrue(c[0].isDelete)
-        XCTAssertEqual(c[0].url.lastPathComponent, "\(sid).jsonl")
-        XCTAssertEqual(c[0].extraURLs.map(\.lastPathComponent), [sid])
-    }
-
-    func testClaudeSessionKeptWhenSiblingDirectoryIsFresh() {
-        let h = TempHome()
-        h.file(".claude/projects/-Users-x/\(sid).jsonl")
-        h.file(".claude/projects/-Users-x/\(sid)/tool-results/a.txt")
-        h.age(".claude", daysAgo: 5)
-        h.age(".claude/projects/-Users-x/\(sid)/tool-results/a.txt", daysAgo: 1)
-        XCTAssertEqual(scan(h, .conversations).deletable, [])
-    }
-
-    func testClaudeOrphanSessionDirectoryIsCandidate() {
-        let h = TempHome()
-        h.file(".claude/projects/-Users-x/\(sid)/tool-results/a.txt")
-        h.age(".claude", daysAgo: 5)
-        let c = scan(h, .conversations)
-        XCTAssertEqual(c.deletable.map(\.url.lastPathComponent), [sid])
-    }
-
-    func testClaudeMemoryAndIndexAreNeverCandidates() {
-        let h = TempHome()
-        h.file(".claude/projects/-Users-x/memory/MEMORY.md")
-        h.file(".claude/projects/-Users-x/sessions-index.json")
-        h.file(".claude/projects/-Users-x/notes.jsonl")
-        h.age(".claude", daysAgo: 400)
-        XCTAssertEqual(scan(h, .conversations), [])
-    }
-
-    func testSessionPinnedByIDIsKept() throws {
-        let h = TempHome()
-        h.file(".claude/projects/-Users-x/\(sid).jsonl")
-        h.age(".claude", daysAgo: 5)
-        try PinStore(file: h.env().pinsFile).add(label: "重要方案", sessionID: sid, agent: "claude", cwd: nil, now: h.now)
-        let c = scan(h, .conversations)
-        XCTAssertEqual(c.deletable, [])
-        XCTAssertTrue(c[0].reason.contains("重要方案"))
     }
 
     func testSessionContainingRegisteredTokenIsKept() throws {
@@ -120,12 +71,10 @@ final class ConversationRuleTests: XCTestCase {
     func testCorruptPinsFileKeepsEveryConversation() {
         let h = TempHome()
         h.file(rollout)
-        h.file(".claude/projects/-Users-x/\(sid).jsonl")
         h.age(".codex", daysAgo: 9)
-        h.age(".claude", daysAgo: 9)
         h.file("Library/Application Support/Sweep/pins.json", text: "[ broken")
         let c = scan(h, .conversations)
-        XCTAssertEqual(c.count, 2)
+        XCTAssertEqual(c.count, 1)
         XCTAssertEqual(c.deletable, [])
     }
 
