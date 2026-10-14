@@ -27,6 +27,8 @@ final class AppModel: ObservableObject {
     /// 整块硬盘的占用。测量要几分钟，跟在扫描后面在后台做，结果缓存。
     @Published var storage: StorageReport?
     @Published var measuringStorage = false
+    /// 定时任务需要用户在系统设置里放行时，提示这句话。
+    @Published var setupNotice: String?
     /// 面板内容的高度，外壳据此调整窗口大小。
     @Published var panelHeight: CGFloat = 0
 

@@ -19,16 +19,23 @@ macOS 菜单栏小工具：自动清理构建缓存、闲置依赖、各类下�
 
 ## 安装与升级
 
-从源码安装（推荐，会同时装好命令行和每日定时任务）：
+**下载安装**（推荐）：从 [Releases](https://github.com/jackleeio/sweep/releases) 下载 `Sweep-x.y.z.dmg`，打开后把 Sweep 拖进「应用程序」。安装包用 Developer ID 签名并经过 Apple 公证，打开时不会被拦截。支持 Apple 芯片和 Intel，需要 macOS 13 以上；圆角液态玻璃外观需要 macOS 26 以上。
+
+首次打开时 app 会自己完成配置：
+
+- 把定时清理注册为后台项目。如果系统提示，在「系统设置 › 通用 › 登录项与扩展」里允许 Sweep。
+- 把内置的命令行链接到 `~/.local/bin/sweep`，agent 标记对话时要用。那个位置已有的文件或别的链接不会被覆盖。如果 `~/.local/bin` 还不在 `PATH` 里，需要自己加上。
+
+在你亲手确认过一次清理之前，自动清理不会开启。
+
+**从源码安装**：
 
 ```bash
 ./scripts/install.sh     # 构建并安装，重复执行即升级
 ./scripts/uninstall.sh   # 卸载（保留配置、标记名单和日志）
 ```
 
-需要 Xcode（用到其中的 Swift 工具链和测试框架）。
-
-也可以从 [Releases](https://github.com/jackleeio/sweep/releases) 下载打包好的 `Sweep.app`，但目前有三点限制：只支持 Apple 芯片；没有经过 Apple 公证，首次打开会被拦截，需要在「系统设置 › 隐私与安全性」里允许；只有菜单栏 app，命令行和定时任务仍要从源码安装。
+需要 Xcode（用到其中的 Swift 工具链和测试框架）。源码安装会在 `~/Library/LaunchAgents` 放自己的定时任务，此时 app 不会再注册它内置的那一份。
 
 ## 什么时候清理
 

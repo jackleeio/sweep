@@ -312,6 +312,11 @@ struct PanelView: View {
 
     @ViewBuilder
     private var notices: some View {
+        if let notice = model.setupNotice {
+            Label(notice, systemImage: "gearshape.2")
+                .font(.caption).foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+        }
         ForEach(model.blocked, id: \.self) { notice in
             Label(notice, systemImage: "exclamationmark.triangle")
                 .font(.caption).foregroundStyle(.orange)

@@ -91,6 +91,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             button.action = #selector(togglePanel)
         }
         panel = makePanel()
+        FirstRunSetup.run(model: model)
 
         model.$free.combineLatest(model.$total)
             .receive(on: RunLoop.main)
@@ -193,6 +194,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if showOnLaunch, let path = ProcessInfo.processInfo.environment["SWEEP_DEBUG_FRAME"] {
             let top = (NSScreen.screens.first?.frame.maxY ?? 0) - frame.maxY
             try? "\(Int(frame.minX)),\(Int(top)),\(Int(frame.width)),\(Int(frame.height)) \(panel.windowNumber)".write(toFile: path, atomically: true, encoding: .utf8)
+        }
+    }
+}
+
+/// 下载版 app 自己把定时任务和命令行配好；源码安装时这些已由安装脚本完成，这里不重复做。
+@MainActor
+enum FirstRunSetup {
+    static let agentPlist = "com.jacklee.sweep.daily.plist"
+
+    static func run(model: AppModel) {
+        let fm = FileManager.default
+        let home = fm.homeDirectoryForCurrentUser
+        let bundle = Bundle.main.bundleURL
+
+        // 定时任务：~/Library/LaunchAgents 里已有同名配置，说明是源码安装，已经在跑了
+        let sourceInstalled = fm.fileExists(atPath: home.appendingPathComponent("Library/LaunchAgents/\(agentPlist)").path)
+        let bundled = fm.fileExists(atPath: bundle.appendingPathComponent("Contents/Library/LaunchAgents/\(agentPlist)").path)
+        if !sourceInstalled, bundled {
+            let service = SMAppService.agent(plistName: agentPlist)
+            if service.status != .enabled { try? service.register() }
+            if service.status == .requiresApproval {
+                model.setupNotice = "定时清理需要你在「系统设置 › 通用 › 登录项与扩展」里允许 Sweep 在后台运行。"
+            }
+        }
+
+        // 命令行：链接到 ~/.local/bin/sweep，agent 标记对话时要用。已有的文件或别的链接不会被覆盖。
+        let cli = bundle.appendingPathComponent("Contents/Helpers/sweep")
+        if fm.isExecutableFile(atPath: cli.path) {
+            _ = CommandLineLink.install(target: cli, at: home.appendingPathComponent(".local/bin/sweep"))
         }
     }
 }

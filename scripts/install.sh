@@ -11,13 +11,12 @@ LOG_DIR="$HOME/Library/Logs/Sweep"
 DOMAIN="gui/$(id -u)"
 
 swift build -c release
+BIN=$(swift build -c release --show-bin-path)
 
-# 菜单栏 app：SwiftPM 只产出可执行文件，这里手工组装成 .app
+# 菜单栏 app：SwiftPM 只产出可执行文件，这里组装成 .app（本机自用，临时签名即可）
 STAGE=build/Sweep.app
-rm -rf "$STAGE"
-mkdir -p "$STAGE/Contents/MacOS"
-cp .build/release/SweepApp "$STAGE/Contents/MacOS/Sweep"
-cp scripts/Info.plist "$STAGE/Contents/Info.plist"
+./scripts/bundle.sh "$BIN" "$STAGE"
+codesign --force --sign - "$STAGE/Contents/Helpers/sweep"
 codesign --force --sign - "$STAGE"
 
 pkill -x Sweep 2>/dev/null || true
@@ -26,7 +25,7 @@ cp -R "$STAGE" "$APP"
 
 # 命令行工具
 mkdir -p "$(dirname "$CLI")"
-install -m 755 .build/release/sweep "$CLI"
+install -m 755 "$BIN/sweep" "$CLI"
 
 # 每日定时任务
 mkdir -p "$LOG_DIR" "$(dirname "$PLIST")"

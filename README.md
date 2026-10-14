@@ -19,16 +19,23 @@ The menu bar app is only a window for viewing and control. Scheduled cleanup kee
 
 ## Install and upgrade
 
-From source (recommended — this also installs the CLI and the scheduled job):
+**Download** (recommended): grab `Sweep-x.y.z.dmg` from [Releases](https://github.com/jackleeio/sweep/releases), open it and drag Sweep into Applications. It is signed with a Developer ID and notarized by Apple, so it opens without warnings. It runs on Apple silicon and Intel Macs with macOS 13 or later; the rounded Liquid Glass look needs macOS 26 or later.
+
+On first launch the app sets itself up:
+
+- It registers the scheduled job as a background item. If macOS asks, allow Sweep under System Settings › General › Login Items & Extensions.
+- It links its built-in CLI to `~/.local/bin/sweep`, which agents use to pin conversations. An existing file or an unrelated link at that path is never replaced. Add `~/.local/bin` to your `PATH` if it isn't there yet.
+
+Automatic cleanup stays off until you confirm a cleanup by hand once.
+
+**From source**:
 
 ```bash
 ./scripts/install.sh     # build and install; run again to upgrade
 ./scripts/uninstall.sh   # uninstall (keeps settings, pin list and logs)
 ```
 
-Requires Xcode (for the Swift toolchain and test frameworks).
-
-You can also download a packaged `Sweep.app` from [Releases](https://github.com/jackleeio/sweep/releases), with three limitations for now: Apple silicon only; not notarized yet, so macOS blocks the first launch and you need to allow it under System Settings › Privacy & Security; and it is only the menu bar app — the CLI and scheduled job still need a source install.
+Requires Xcode (for the Swift toolchain and test frameworks). A source install puts its own scheduled job in `~/Library/LaunchAgents`, and the app then skips registering its bundled one.
 
 ## When it cleans
 
