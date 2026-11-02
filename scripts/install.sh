@@ -27,11 +27,21 @@ cp -R "$STAGE" "$APP"
 mkdir -p "$(dirname "$CLI")"
 install -m 755 "$BIN/sweep" "$CLI"
 
-# 每日定时任务
+# 每日定时任务。配置没变且已注册就不重新加载：定时任务调用的是上面装好的命令行，
+# 下次运行自然用上新版本；先卸载再注册失败的话（比如在受限的沙箱里），定时清理会一直停到下次登录
 mkdir -p "$LOG_DIR" "$(dirname "$PLIST")"
-sed -e "s|__CLI__|$CLI|g" -e "s|__LOG_DIR__|$LOG_DIR|g" scripts/launchd.plist > "$PLIST"
-launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
-launchctl bootstrap "$DOMAIN" "$PLIST"
+NEW_PLIST=$(mktemp)
+sed -e "s|__CLI__|$CLI|g" -e "s|__LOG_DIR__|$LOG_DIR|g" scripts/launchd.plist > "$NEW_PLIST"
+if cmp -s "$NEW_PLIST" "$PLIST" && launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+    rm -f "$NEW_PLIST"
+else
+    mv "$NEW_PLIST" "$PLIST"
+    launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+    if ! launchctl bootstrap "$DOMAIN" "$PLIST"; then
+        echo "⚠️  定时任务没能注册，定时清理会停到下次登录。请在自己的终端里执行："
+        echo "    launchctl bootstrap $DOMAIN $PLIST"
+    fi
+fi
 
 open "$APP"
 
