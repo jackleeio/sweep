@@ -490,6 +490,23 @@ struct PanelView: View {
                     value: configBinding(\.targetFreeGB), in: 0...800, step: 50)
             Toggle("保留 AI 工具的缓存", isOn: configBinding(\.appCaches.keepAITools))
             Toggle("自动清理", isOn: Binding(get: { model.state.armed }, set: { model.setArmed($0) }))
+            Toggle("自动结束 agent 留下的闲置进程", isOn: configBinding(\.processes.enabled))
+            if model.config.processes.enabled {
+                VStack(alignment: .leading, spacing: 4) {
+                    Toggle("孤儿残留进程（闲置 \(Format.number(model.config.processes.orphanIdleHours)) 小时）",
+                           isOn: configBinding(\.processes.orphans))
+                    Toggle("Codex 积压的工具进程（闲置 \(Format.number(model.config.processes.codexToolIdleHours)) 小时）",
+                           isOn: configBinding(\.processes.codexTools))
+                    Toggle("agent 遗留的 dev server 和构建（闲置 \(Format.number(model.config.processes.devServerIdleHours)) 小时）",
+                           isOn: configBinding(\.processes.devServers))
+                    Toggle("闲置的 agent 终端会话（仅内存吃紧时）", isOn: configBinding(\.processes.idleSessions))
+                    Stepper(model.config.processes.devServerMemoryCapGB > 0
+                            ? "dev server 超过 \(Format.number(model.config.processes.devServerMemoryCapGB)) GB 即使在用也结束"
+                            : "dev server 内存上限：不限",
+                            value: configBinding(\.processes.devServerMemoryCapGB), in: 0...32)
+                }
+                .padding(.leading, 16)
+            }
             Toggle("开机时启动", isOn: Binding(get: { model.launchAtLogin }, set: { model.setLaunchAtLogin($0) }))
         }
         .font(.callout)

@@ -22,6 +22,8 @@ public struct Env {
     public var freeBytes: () -> Int64
     /// 项目目录之外引用到项目的路径：全局 link 的包、PATH 上的命令、技能链接、定时任务。
     public var externalReferences: () -> [String] = { [] }
+    /// 进程表和结束进程的动作。默认读不到进程表，什么都不会结束。
+    public var processSystem: ProcessSystem = NoProcessSystem()
 
     public init(home: URL, now: Date, processProbe: ProcessProbe, freeBytes: @escaping () -> Int64 = { .max }) {
         self.home = home
@@ -36,6 +38,8 @@ public struct Env {
     public var pinsFile: URL { supportDir.appendingPathComponent("pins.json") }
     public var stateFile: URL { supportDir.appendingPathComponent("state.json") }
     public var logFile: URL { logDir.appendingPathComponent("sweep.log") }
+    /// 各进程上次被看到时的 CPU 用量，用来判断闲置了多久。
+    public var processesFile: URL { supportDir.appendingPathComponent("processes.json") }
 
     /// 展开以 ~ 开头的路径。
     public func expand(_ path: String) -> URL {

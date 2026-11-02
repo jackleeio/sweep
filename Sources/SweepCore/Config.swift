@@ -190,6 +190,62 @@ public struct Config: Codable, Equatable {
         }
     }
 
+    /// 结束 agent 留下的闲置进程。和删文件分开：总开关默认关，打开即视为确认，不看 armed。
+    public struct Processes: Codable, Equatable {
+        public var enabled = false
+        /// 父 agent 已退出、被系统收养的 MCP、测试、构建、dev server，以及在临时目录里跑的进程。
+        public var orphans = true
+        /// Codex 应用每个对话各起一套、从不回收的 MCP 和工具进程。
+        public var codexTools = true
+        /// agent 启动后不再用的 dev server、构建和测试。
+        public var devServers = true
+        /// 开着不用的 agent 终端会话。只在系统报告内存压力时才结束。
+        public var idleSessions = true
+        public var orphanIdleHours: Double = 1
+        public var codexToolIdleHours: Double = 3
+        public var devServerIdleHours: Double = 3
+        public var sessionIdleHours: Double = 24
+        /// agent 起的 dev server 内存超过这个值时，即使在用也结束（Turbopack 常驻会一直涨）。0 表示关闭。
+        public var devServerMemoryCapGB: Double = 0
+        /// 命令行里含这些文字的进程（及其所在的进程树）不会被结束。
+        public var excludes: [String] = []
+
+        public init() {}
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            let d = Processes()
+            enabled = try c.value(.enabled, default: d.enabled)
+            orphans = try c.value(.orphans, default: d.orphans)
+            codexTools = try c.value(.codexTools, default: d.codexTools)
+            devServers = try c.value(.devServers, default: d.devServers)
+            idleSessions = try c.value(.idleSessions, default: d.idleSessions)
+            orphanIdleHours = try c.value(.orphanIdleHours, default: d.orphanIdleHours)
+            codexToolIdleHours = try c.value(.codexToolIdleHours, default: d.codexToolIdleHours)
+            devServerIdleHours = try c.value(.devServerIdleHours, default: d.devServerIdleHours)
+            sessionIdleHours = try c.value(.sessionIdleHours, default: d.sessionIdleHours)
+            devServerMemoryCapGB = try c.value(.devServerMemoryCapGB, default: d.devServerMemoryCapGB)
+            excludes = try c.value(.excludes, default: d.excludes)
+        }
+
+        public func isEnabled(_ rule: ProcessRule) -> Bool {
+            switch rule {
+            case .orphans: return orphans
+            case .codexTools: return codexTools
+            case .devServers: return devServers
+            case .idleSessions: return idleSessions
+            }
+        }
+
+        public func idleHours(_ rule: ProcessRule) -> Double {
+            switch rule {
+            case .orphans: return orphanIdleHours
+            case .codexTools: return codexToolIdleHours
+            case .devServers: return devServerIdleHours
+            case .idleSessions: return sessionIdleHours
+            }
+        }
+    }
+
     /// 体积大、但不能靠删文件来清理的东西。只在界面上列出，提醒它们的存在。
     public enum BigItems {
         public static let builtin: [(path: String, note: String)] = [
@@ -221,6 +277,7 @@ public struct Config: Codable, Equatable {
     public var appCaches = AppCaches()
     public var artifacts = Artifacts()
     public var workCopies = WorkCopies()
+    public var processes = Processes()
 
     public init() {}
 
@@ -243,6 +300,7 @@ public struct Config: Codable, Equatable {
         appCaches = try c.value(.appCaches, default: d.appCaches)
         artifacts = try c.value(.artifacts, default: d.artifacts)
         workCopies = try c.value(.workCopies, default: d.workCopies)
+        processes = try c.value(.processes, default: d.processes)
     }
 
     /// 这条规则现在会不会真的清理东西。

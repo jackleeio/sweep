@@ -2,7 +2,7 @@
 
 English | [中文](README.zh-CN.md)
 
-A macOS menu bar utility that automatically cleans up build caches, idle dependencies, download caches and stale AI-agent conversations, so your disk always keeps enough free space.
+A macOS menu bar utility that automatically cleans up build caches, idle dependencies, download caches and stale AI-agent conversations, so your disk always keeps enough free space. It can also end idle processes that agents leave behind, to give memory back.
 
 It started when a Next.js project's Turbopack dev cache quietly grew to 136 GB. Together with agent session logs and package caches, that filled a 1 TB disk to 97%.
 
@@ -139,6 +139,42 @@ The "Full disk usage" section of the panel breaks the whole disk down by area: p
 
 Measuring the whole home folder takes two to three minutes, so it runs in the background after a scan and is cached for 6 hours. You can also click Refresh or run `sweep storage`. "Can't be measured" is used space minus everything that could be measured — mostly system-protected folders such as WeChat, browsers, Mail, the Photos library and the Trash.
 
+## Ending idle agent processes
+
+Agents fill up memory as well as disk: every conversation starts its own set of MCP servers, dev servers and test runs are left running when the work is done, and terminal sessions stay open long after anyone uses them. In one investigation, processes on a 32 GB machine added up to 71 GB, and about half of it was this kind of leftover. The largest single one was a Turbopack dev server that had been running for a few hours and had grown to 8 GB.
+
+This is off by default. Turn it on under Settings in the menu bar, or run `sweep procs on`. It doesn't depend on the "Automatic cleanup" switch: turning it on is the confirmation.
+
+Once on, the scheduled job looks at the process table every 10 minutes and records how much CPU each process has used in total. A process that used less than 1% of a core between two looks counts as idle; terminal sessions use 5% and also require that their terminal received no input. A process tree is ended only after every process in it has been idle long enough, and then the whole tree goes together: SIGTERM first, then SIGKILL for anything still there after 5 seconds.
+
+| Category | How it is recognised | Idle time before ending |
+|---|---|---|
+| Orphaned leftovers | Parent has exited and launchd adopted it, and it is itself an MCP server, a test, a build or a dev server, or runs from a temporary directory | 1 hour; dev servers and builds 3 hours |
+| Codex tool processes | The MCP and tool processes the Codex app starts for each conversation (rea, blender, computer-use, node_repl and so on) | 3 hours |
+| Dev servers and builds left by agents | `next dev`, `npm run build`, `bun test`, `tsc`, `vite` and the like with an agent (Claude Code, Codex, grok and others) among their ancestors, counted from the topmost one | 3 hours |
+| Idle agent terminal sessions | Agent CLIs running in a terminal | 24 hours, and only while the system reports memory pressure |
+
+There is also an optional cap: a dev server started by an agent is ended even while in use once its memory goes above the set value. It is off by default. A long-running Turbopack server keeps growing, and since someone is always using it, the idle condition never holds.
+
+Safety rules:
+
+1. Only recognised processes are ended. Long-running services you started yourself (proxies, sync daemons and so on) don't look like agent leftovers and are never touched.
+2. A process seen for the first time is never ended, and an unreadable observation record starts over from scratch. Idle time counts from when the feature was turned on.
+3. Only your own processes are ended. A tree containing another user's process is kept whole.
+4. Services managed by launchd are not orphans. If launchd's service list can't be read, the orphan rule ends nothing.
+5. Programs inside apps, extensions and XPC services are not orphans, and an orphan with a terminal counts only if it is an MCP server.
+6. Claude Code's background tasks also have launchd as their parent. A process that refers to a session's temporary directory is kept as long as that session has shown activity within the last 6 hours.
+7. Sweep itself and its ancestors are never ended, nor is any tree whose command line contains any text listed in `processes.excludes`.
+8. The pid and start time are checked again right before ending, so a reused pid never gets the wrong process killed.
+9. Rehearsals with `SWEEP_HOME` set only look and never end anything.
+10. Each ended group is logged immediately (an `END` line).
+
+```bash
+sweep procs [--all]   # list processes agents left behind: whether each group would be ended, and why
+sweep procs --end     # end the ones that have been idle long enough, now
+sweep procs on | off  # turn automatic ending on / off
+```
+
 ## Command line
 
 ```bash
@@ -149,6 +185,8 @@ sweep status                    # status
 sweep refs                      # project paths referenced from outside
 sweep storage                   # full disk usage and what can be deleted
 sweep arm | disarm              # turn automatic cleanup on / off
+sweep procs [--all] [--end]     # processes agents left behind; --end ends the idle ones now
+sweep procs on | off            # turn automatic ending of idle processes on / off
 ```
 
 Set `SWEEP_HOME=/some/dir` to point every path at another directory, for rehearsals that never touch real data.
@@ -157,8 +195,8 @@ Set `SWEEP_HOME=/some/dir` to point every path at another directory, for rehears
 
 | Content | Path |
 |---|---|
-| Settings, pin list, run state, last scan results | `~/Library/Application Support/Sweep/` |
-| Cleanup log (what was deleted, how big, and why) | `~/Library/Logs/Sweep/sweep.log` |
+| Settings, pin list, run state, last scan results, process observations | `~/Library/Application Support/Sweep/` |
+| Cleanup log (what was deleted or ended, how big, and why) | `~/Library/Logs/Sweep/sweep.log` |
 | Scheduled-job output | `~/Library/Logs/Sweep/launchd.log` |
 
 ## Known limitations
@@ -167,6 +205,7 @@ Set `SWEEP_HOME=/some/dir` to point every path at another directory, for rehears
 - **Sizes are estimates.** Hard links are handled, but APFS clones can't be detected, so the space actually freed may be less than shown.
 - **System-protected folders can't be read.** WeChat, Chrome profiles, Mail, the Trash and similar require Full Disk Access; Sweep doesn't touch them.
 - **Runs only in your own graphical session.** The scheduled job is a per-user LaunchAgent and doesn't run while you're logged out.
+- **Process idleness is judged by CPU.** A process that sits waiting for you to look at it, using almost no CPU, also counts as idle; add such processes to `processes.excludes`. Terminal sessions also check for input, but switching window focus counts as input too, so a session can only be ended later than expected, never earlier.
 
 ## Development
 

@@ -14,6 +14,9 @@ sweep — 定时清理构建缓存、依赖、应用缓存和 agent 对话
   sweep refs                      列出被全局命令、技能、定时任务引用的项目路径
   sweep storage                   整块硬盘的占用，以及每块能不能删（需要几分钟）
   sweep arm | disarm              开启 / 关闭自动清理
+  sweep procs [--all]             列出 agent 留下的进程，以及会不会被结束
+  sweep procs --end               立即结束已经闲置够久的进程
+  sweep procs on | off            开启 / 关闭自动结束闲置进程
 """
 
 let args = Array(CommandLine.arguments.dropFirst())
@@ -82,6 +85,16 @@ func scheduledTick() throws {
             Notifier.post(title: "Sweep 清理失败", body: "配置文件无法读取，清理已暂停，没有删除任何东西。")
         }
         throw error
+    }
+
+    if let processes = outcome.processes, !processes.ended.isEmpty || !processes.failed.isEmpty {
+        let freed = Format.bytes(processes.freedBytes)
+        print("\(stamp(env.now)) 结束闲置进程：\(ProcessText.summary(processes.ended))，释放约 \(freed) 内存"
+              + (processes.failed.isEmpty ? "" : "，\(processes.failed.count) 组没能结束"))
+        if processes.freedBytes >= 500_000_000 {
+            Notifier.post(title: "Sweep 结束了闲置进程",
+                          body: "\(ProcessText.summary(processes.ended))，释放约 \(freed) 内存。明细见日志。")
+        }
     }
 
     let free = Format.bytes(outcome.freeAfter)
@@ -205,6 +218,27 @@ func listReferences() {
     for ref in inside.sorted() { print(ref) }
 }
 
+/// agent 留下的进程。闲置时长靠定时任务连续观察得出，刚开启时所有进程都从 0 算起。
+func processes() throws {
+    var config = try Config.load(from: env.configFile)
+    if let toggle = args.dropFirst().first, toggle == "on" || toggle == "off" {
+        config.processes.enabled = toggle == "on"
+        try config.save(to: env.configFile)
+        return print(toggle == "on"
+                     ? "已开启：定时任务每 10 分钟观察一次，结束闲置够久的 agent 进程。闲置时长从现在开始算。"
+                     : "已关闭自动结束闲置进程。")
+    }
+    let end = args.contains("--end")
+    let result = ProcessReaper(env: env).run(config.processes, end: end)
+    if let error = result.error { fail(error) }
+    print("自动结束闲置进程：\(config.processes.enabled ? "已开启" : "未开启（sweep procs on 开启）")\n")
+    print(ProcessText.list(result, home: env.home.path, limitPerRule: args.contains("--all") ? nil : 15))
+    if end {
+        print("已结束 \(result.ended.count) 组，释放约 \(Format.bytes(result.freedBytes)) 内存。")
+        for item in result.failed { print("  没能结束：pid \(item.root.pid) \(item.root.name)") }
+    }
+}
+
 func setArmed(_ armed: Bool) throws {
     var state = SweepState.load(from: env.stateFile)
     state.armed = armed
@@ -222,6 +256,7 @@ do {
     case "status": try status()
     case "refs": listReferences()
     case "storage": try storage()
+    case "procs": try processes()
     case "arm": try setArmed(true)
     case "disarm": try setArmed(false)
     default: print(usage)

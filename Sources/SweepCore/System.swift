@@ -76,6 +76,8 @@ extension Env {
         let home = override ?? FileManager.default.homeDirectoryForCurrentUser
         var env = Env(home: home, now: Date(), processProbe: LiveProcessProbe(), freeBytes: { Disk.usage(at: home).free })
         env.externalReferences = { ExternalReferences.collect(home: home) }
+        // 演练时可以看进程表，但进程是全机共享的，不能真的结束
+        env.processSystem = LiveProcessSystem(canEnd: override == nil)
         return env
     }
 }

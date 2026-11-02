@@ -23,7 +23,6 @@ public struct Cleaner {
 
     /// 这些规则删完后会顺手清掉因此变空的上级目录（如 Codex 的日期目录）。
     private static let prunedRules: Set<RuleID> = [.conversations, .claudeConversations, .artifacts]
-    private static let maxLogBytes: Int64 = 5 << 20
 
     public init(env: Env) { self.env = env }
 
@@ -90,18 +89,28 @@ public struct Cleaner {
     }
 
     private func logLine(_ action: String, _ candidate: Candidate, _ detail: String) -> String {
-        let formatter = ISO8601DateFormatter()
-        formatter.timeZone = .current
-        let stamp = formatter.string(from: env.now)
-        return "\(stamp) \(action) \(candidate.rule.rawValue) \(Format.bytes(candidate.bytes)) \(candidate.url.path) — \(detail)"
+        "\(SweepLog.stamp(env.now)) \(action) \(candidate.rule.rawValue) \(Format.bytes(candidate.bytes)) \(candidate.url.path) — \(detail)"
     }
 
-    private func appendLog(_ line: String) {
+    private func appendLog(_ line: String) { SweepLog.append(line, env: env) }
+}
+
+/// 清理日志。删文件和结束进程都写在这里，一行一项。
+enum SweepLog {
+    private static let maxBytes: Int64 = 5 << 20
+
+    static func stamp(_ date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.timeZone = .current
+        return formatter.string(from: date)
+    }
+
+    static func append(_ line: String, env: Env) {
         let fm = FileManager.default
         try? fm.createDirectory(at: env.logDir, withIntermediateDirectories: true)
 
         // 日志自己也不能无限增长：超过上限就轮转一份
-        if let size = (try? fm.attributesOfItem(atPath: env.logFile.path))?[.size] as? Int64, size > Self.maxLogBytes {
+        if let size = (try? fm.attributesOfItem(atPath: env.logFile.path))?[.size] as? Int64, size > maxBytes {
             let old = env.logFile.appendingPathExtension("1")
             try? fm.removeItem(at: old)
             try? fm.moveItem(at: env.logFile, to: old)
@@ -214,6 +223,8 @@ public struct TickOutcome {
     /// 清理后可用空间仍低于警戒线，且今天还没提醒过。
     public var stillLow = false
     public var freeAfter: Int64 = 0
+    /// 结束闲置进程的结果；没打开这项时为 nil。
+    public var processes: ProcessResult?
 }
 
 public struct Runner {
@@ -235,11 +246,15 @@ public struct Runner {
     /// - 可用空间低于警戒线：立即按收紧规则清理（每小时最多一次）；
     /// - 今天的例行清理还没做：按常规规则清理，之后若仍低于目标余量，再按收紧规则清一遍；
     /// - 用户还没确认过首次清理：只扫描并提醒，每天一次，绝不删除。
+    /// 结束闲置进程每次都做（要靠连续观察判断闲置），有自己的总开关，不看 armed。
     public func tick() throws -> TickOutcome {
         // 配置损坏时在这里抛错，什么都不删
         let config = try Config.load(from: env.configFile)
         var state = SweepState.load(from: env.stateFile)
         var outcome = TickOutcome()
+        if config.processes.enabled {
+            outcome.processes = ProcessReaper(env: env).run(config.processes, end: true)
+        }
 
         func since(_ date: Date?) -> TimeInterval { date.map { env.now.timeIntervalSince($0) } ?? .infinity }
         let floor = Int64(config.lowSpaceGB * Format.gigabyte)
