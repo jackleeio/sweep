@@ -154,7 +154,9 @@ sweep unkeep "标签"        # 取消标记
 | agent 遗留的 dev server 和构建 | 上级进程里有 agent（Claude Code、Codex、grok 等）的 `next dev`、`npm run build`、`bun test`、`tsc`、`vite` 等，从最上层的一个算起 | 3 小时 |
 | 闲置的 agent 终端会话 | 在终端里运行的 agent CLI | 24 小时，并且只在系统报告内存压力时才结束 |
 
-另有一个可选的上限：agent 起的 dev server 内存超过设定值时，即使还在用也结束，默认不限。Turbopack 常驻会一直涨，又一直有人在用，闲置条件永远满足不了。
+同一个项目目录里有多个 agent 起的 dev server 时，只保留最近在用的那个，其余闲置 30 分钟就结束。几个 agent 改同一个项目，共用一个 dev server 就够了。
+
+另有一个可选的上限：agent 起的 dev server 内存超过设定值时，即使还在用也结束，默认不限。Turbopack 常驻会一直涨，又一直有人在用，闲置条件永远满足不了。这个上限和上面的「只留一个」都只针对常驻的 dev server，不包括构建和测试：构建本来就吃内存、跑完自己退出，中途结束只会让 agent 重来一遍。
 
 保护规则：
 

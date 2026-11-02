@@ -37,9 +37,11 @@ public struct ProcessEntry: Equatable {
     public var memory: Int64
     /// 控制终端，如 ttys005。
     public var tty: String?
+    /// 工作目录。用来认出同一个项目的多个 dev server；读不到为 nil。
+    public var cwd: String?
 
     public init(pid: Int32, ppid: Int32, uid: UInt32, name: String, executable: String, arguments: [String],
-                startMicros: Int64, cpuSeconds: Double, memory: Int64, tty: String?) {
+                startMicros: Int64, cpuSeconds: Double, memory: Int64, tty: String?, cwd: String? = nil) {
         self.pid = pid
         self.ppid = ppid
         self.uid = uid
@@ -50,6 +52,7 @@ public struct ProcessEntry: Equatable {
         self.cpuSeconds = cpuSeconds
         self.memory = memory
         self.tty = tty
+        self.cwd = cwd
     }
 
     public var command: String { arguments.isEmpty ? executable : arguments.joined(separator: " ") }
@@ -102,6 +105,16 @@ enum ProcessSignature {
         #"(^|[\s/])(bun test|esbuild --service|wrangler dev)"#,
         #"(^|[\s/])(npm|pnpm|yarn|bun) (run )?(dev|build|test|start)([\s:]|$)"#,
     ].joined(separator: "|"))
+    /// 常驻的 dev server，以及一次性的构建和测试。内存上限和「同一项目多份」只针对前者：
+    /// 构建本来就吃内存、跑完自己退出，中途结束只会让 agent 重来。
+    private static let server = regex([
+        #"(^|[\s/])(next dev|next-server|vite|nodemon|storybook|wrangler dev)([\s:]|$)"#,
+        #"(^|[\s/])(npm|pnpm|yarn|bun) (run )?(dev|start)([\s:]|$)"#,
+    ].joined(separator: "|"))
+    private static let buildOrTest = regex([
+        #"(^|[\s/])(next build|vite build|tsc|jest|vitest|playwright|bun test)([\s:]|$)"#,
+        #"(^|[\s/])(npm|pnpm|yarn|bun) (run )?(build|test)([\s:]|$)"#,
+    ].joined(separator: "|"))
     /// 只是用来套一层的进程：本身不说明什么，看它下面跑的是什么。
     private static let wrappers: Set<String> = ["sh", "bash", "zsh", "dash", "timeout", "gtimeout", "env", "nohup"]
     private static let agentNames: Set<String> = ["claude", "codex", "gemini", "opencode", "cursor-agent", "aider",
@@ -113,6 +126,10 @@ enum ProcessSignature {
 
     static func isMCP(_ command: String) -> Bool { matches(mcp, command) }
     static func isDevTool(_ command: String) -> Bool { matches(devTool, command) }
+    /// 树里跑着 dev server，并且没有在构建或测试。
+    static func isServerTree(_ members: [ProcessEntry]) -> Bool {
+        members.contains { matches(server, $0.command) } && !members.contains { matches(buildOrTest, $0.command) }
+    }
     static func isWrapper(_ p: ProcessEntry) -> Bool { wrappers.contains(p.name) }
 
     /// 临时目录只认 /tmp 和 /var/folders/…/T/。/var/folders 下的其他目录放着应用的缓存和包装过的应用。
@@ -323,23 +340,44 @@ public struct ProcessPlanner {
             }
         }
 
-        let judged = found.map { judge($0.rule, tree($0.root), snapshot: snapshot, watch: watch, protected: protected) }
+        // 同一个项目目录里有几个 agent 起的 dev server：最近在用的那个算正主（一样就留先起的），其余是多余的
+        var duplicateOf: [Int32: Int32] = [:]
+        let devServers = found.filter { $0.rule == .devServers && ProcessSignature.isServerTree(tree($0.root)) }
+            .map { ($0.root, lastActivity(tree($0.root), .devServers, watch)) }
+        let byProject = Dictionary(grouping: devServers.filter { !($0.0.cwd ?? "").isEmpty }, by: { $0.0.cwd! })
+        for group in byProject.values where group.count > 1 {
+            let kept = group.max { a, b in a.1 != b.1 ? a.1 < b.1 : a.0.startMicros > b.0.startMicros }!
+            for (root, _) in group where root.pid != kept.0.pid { duplicateOf[root.pid] = kept.0.pid }
+        }
+
+        let judged = found.map {
+            judge($0.rule, tree($0.root), snapshot: snapshot, watch: watch, protected: protected, duplicateOf: duplicateOf[$0.root.pid])
+        }
         // 外层整棵要结束时，里面单独列出的候选就不必再列
         let ending = Set(judged.filter(\.isEnd).map(\.root.pid))
         return judged.filter { candidate in !ancestors(candidate.root).contains { ending.contains($0.pid) } }
     }
 
-    private func judge(_ rule: ProcessRule, _ members: [ProcessEntry], snapshot: ProcessSnapshot, watch: ProcessWatch,
-                       protected: Set<Int32>) -> ProcessCandidate {
-        let idleSince = members.map { p -> Date in
+    /// 整棵树里最近一次有活动的时间。没见过的进程按「刚刚还在用」算。
+    private func lastActivity(_ members: [ProcessEntry], _ rule: ProcessRule, _ watch: ProcessWatch) -> Date {
+        members.map { p -> Date in
             guard let seen = watch.seen[p.key] else { return now }
             return rule == .idleSessions ? seen.lastBusy : seen.lastActive
         }.max() ?? now
+    }
+
+    private func judge(_ rule: ProcessRule, _ members: [ProcessEntry], snapshot: ProcessSnapshot, watch: ProcessWatch,
+                       protected: Set<Int32>, duplicateOf: Int32?) -> ProcessCandidate {
+        let idleSince = lastActivity(members, rule, watch)
         let idleHours = max(0, now.timeIntervalSince(idleSince)) / 3600
         // 孤儿里的 dev server 可能还开着页面在看，和 agent 名下的 dev server 等一样久
         let orphanDevServer = rule == .orphans && members.contains { ProcessSignature.isDevTool($0.command) }
-        let threshold = orphanDevServer ? max(config.orphanIdleHours, config.devServerIdleHours) : config.idleHours(rule)
-        let idleText = "闲置 \(String(format: "%.1f", idleHours)) 小时"
+        var threshold = orphanDevServer ? max(config.orphanIdleHours, config.devServerIdleHours) : config.idleHours(rule)
+        var idleText = "闲置 \(String(format: "%.1f", idleHours)) 小时"
+        if let duplicateOf {
+            threshold = config.duplicateDevServerIdleMinutes / 60
+            idleText += "，同一项目还有 pid \(duplicateOf) 在用"
+        }
         func make(_ verdict: ProcessVerdict) -> ProcessCandidate {
             ProcessCandidate(rule: rule, members: members, idleSince: idleSince, verdict: verdict)
         }
@@ -361,14 +399,15 @@ public struct ProcessPlanner {
             }
         }
         let memory = members.reduce(Int64(0)) { $0 + $1.memory }
-        if rule == .devServers, config.devServerMemoryCapGB > 0, Double(memory) > config.devServerMemoryCapGB * Format.gigabyte {
+        if rule == .devServers, config.devServerMemoryCapGB > 0, Double(memory) > config.devServerMemoryCapGB * Format.gigabyte,
+           ProcessSignature.isServerTree(members) {
             return make(.end(reason: "内存 \(Format.bytes(memory)) 超过上限 \(Format.number(config.devServerMemoryCapGB)) GB"))
         }
         if rule == .idleSessions, !snapshot.underMemoryPressure {
             return make(.keep(reason: "\(idleText)；内存不紧张，先不结束"))
         }
         if idleHours >= threshold { return make(.end(reason: idleText)) }
-        return make(.keep(reason: "\(idleText)，满 \(Format.number(threshold)) 小时才结束"))
+        return make(.keep(reason: "\(idleText)；满 \(Format.number(threshold)) 小时才结束"))
     }
 }
 

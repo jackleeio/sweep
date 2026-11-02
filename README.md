@@ -154,7 +154,9 @@ Once on, the scheduled job looks at the process table every 10 minutes and recor
 | Dev servers and builds left by agents | `next dev`, `npm run build`, `bun test`, `tsc`, `vite` and the like with an agent (Claude Code, Codex, grok and others) among their ancestors, counted from the topmost one | 3 hours |
 | Idle agent terminal sessions | Agent CLIs running in a terminal | 24 hours, and only while the system reports memory pressure |
 
-There is also an optional cap: a dev server started by an agent is ended even while in use once its memory goes above the set value. It is off by default. A long-running Turbopack server keeps growing, and since someone is always using it, the idle condition never holds.
+When several agent-started dev servers run in the same project directory, only the one used most recently is kept; the others are ended after 30 minutes idle. Agents working on the same project only need one dev server between them.
+
+There is also an optional cap: a dev server started by an agent is ended even while in use once its memory goes above the set value. It is off by default. A long-running Turbopack server keeps growing, and since someone is always using it, the idle condition never holds. The cap and the one-per-project rule above apply only to long-running dev servers, not to builds or tests: a build is supposed to use a lot of memory and exits by itself, and ending it halfway only makes the agent start over.
 
 Safety rules:
 

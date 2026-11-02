@@ -25,12 +25,12 @@ extension Config.Processes {
 }
 
 private func proc(_ pid: Int32, parent: Int32 = 1, _ command: String, name: String? = nil, exe: String? = nil,
-                  cpu: Double = 0, mb: Int64 = 100, tty: String? = nil, uid: UInt32 = me) -> ProcessEntry {
+                  cpu: Double = 0, mb: Int64 = 100, tty: String? = nil, uid: UInt32 = me, cwd: String? = nil) -> ProcessEntry {
     let args = command.split(separator: " ").map(String.init)
     let executable = exe ?? args.first ?? ""
     return ProcessEntry(pid: pid, ppid: parent, uid: uid, name: name ?? URL(fileURLWithPath: executable).lastPathComponent,
                         executable: executable, arguments: args, startMicros: Int64(pid) * 1000, cpuSeconds: cpu,
-                        memory: mb << 20, tty: tty)
+                        memory: mb << 20, tty: tty, cwd: cwd)
 }
 
 private func snapshot(_ processes: [ProcessEntry], launchd: Set<Int32>? = [], pressure: Bool = false,
@@ -372,9 +372,84 @@ final class ProcessPlannerTests: XCTestCase {
         XCTAssertEqual(ending(busyDevServer(mb: 2000, capGB: 4)), [])
     }
 
+    func testMemoryCapDoesNotEndBuildsOrTests() {
+        // 生产构建本来就要吃很多内存、跑完自己退出；中途结束只会让 agent 重来
+        let t1 = t0 + 600
+        var config = Config.Processes.allOn
+        config.devServerMemoryCapGB = 6
+        func tree(_ cpu: Double) -> [ProcessEntry] {
+            codexTree() + [proc(1040, parent: 1001, "npm run build:local"),
+                           proc(1041, parent: 1040, "node /p/node_modules/.bin/next build", cpu: cpu, mb: 7500),
+                           proc(1050, parent: 1001, "bun test", cpu: cpu, mb: 7000)]
+        }
+        var watch = ProcessWatch()
+        watch.observe(snapshot(tree(0)), now: t0)
+        let snap = snapshot(tree(300))
+        watch.observe(snap, now: t1)
+        XCTAssertEqual(ending(ProcessPlanner(config: config, now: t1).plan(snap, watch: watch)), [])
+    }
+
+    func testBuildIsNotADuplicateOfTheDevServer() {
+        // 同一目录里一个闲置的 dev server、一个正在跑的构建：两者不是同一样东西的两份
+        let t1 = t0 + 3600
+        func tree(_ cpu: Double) -> [ProcessEntry] {
+            codexTree() + [proc(1020, parent: 1001, "npm run dev:agent", cwd: "/p/web"),
+                           proc(1021, parent: 1020, "next-server (v15.5.21)", cwd: "/p/web"),
+                           proc(1040, parent: 1001, "npm run build", cpu: cpu, cwd: "/p/web")]
+        }
+        var watch = ProcessWatch()
+        watch.observe(snapshot(tree(0)), now: t0)
+        let snap = snapshot(tree(300))
+        watch.observe(snap, now: t1)
+        XCTAssertEqual(ending(ProcessPlanner(config: .allOn, now: t1).plan(snap, watch: watch)), [])
+    }
+
     func testMemoryCapIsOffByDefault() {
         XCTAssertEqual(Config.Processes().devServerMemoryCapGB, 0)
         XCTAssertEqual(ending(busyDevServer(mb: 30_000, capGB: 0)), [])
+    }
+
+    // MARK: 同一项目的多个 dev server
+
+    /// Codex 名下同一目录（或不同目录）的两个 dev server，先看一次，隔 hours 小时再看一次。
+    private func twoDevServers(after hours: Double, firstCPU: Double = 0, secondCPU: Double = 0,
+                               secondDir: String? = "/p/web") -> [ProcessCandidate] {
+        let t1 = t0 + hours * 3600
+        func tree(_ a: Double, _ b: Double) -> [ProcessEntry] {
+            codexTree() + [proc(1020, parent: 1001, "npm run dev:agent", cwd: "/p/web"),
+                           proc(1021, parent: 1020, "next-server (v15.5.21)", cpu: a, cwd: "/p/web"),
+                           proc(1030, parent: 1001, "npx next dev --turbopack --port 3002", cwd: secondDir),
+                           proc(1031, parent: 1030, "next-server (v15.5.21)", cpu: b, cwd: secondDir)]
+        }
+        var watch = ProcessWatch()
+        watch.observe(snapshot(tree(0, 0)), now: t0)
+        let snap = snapshot(tree(firstCPU, secondCPU))
+        watch.observe(snap, now: t1)
+        return ProcessPlanner(config: .allOn, now: t1).plan(snap, watch: watch).filter { $0.rule == .devServers }
+    }
+
+    func testExtraDevServerInSameProjectIsEndedSooner() {
+        // 都闲置 1 小时：先起的那个留着（还没到 3 小时），后起的多余一份按 30 分钟算
+        let c = twoDevServers(after: 1)
+        XCTAssertEqual(ending(c), [1030])
+        XCTAssertEqual(c.first { $0.root.pid == 1030 }?.reason.contains("pid 1020"), true)
+    }
+
+    func testTheDevServerInUseIsTheOneKept() {
+        // 后起的那个刚刚还在用，就留它，结束先起的那个
+        XCTAssertEqual(ending(twoDevServers(after: 1, secondCPU: 300)), [1020])
+    }
+
+    func testBothDevServersInUseAreKept() {
+        XCTAssertEqual(ending(twoDevServers(after: 1, firstCPU: 300, secondCPU: 300)), [])
+    }
+
+    func testDevServersInDifferentProjectsKeepTheirOwnThreshold() {
+        XCTAssertEqual(ending(twoDevServers(after: 1, secondDir: "/p/other")), [])
+    }
+
+    func testUnknownWorkingDirectoryIsNotTreatedAsDuplicate() {
+        XCTAssertEqual(ending(twoDevServers(after: 1, secondDir: nil)), [])
     }
 
     func testDevServerUnderClaudeCodeCounts() {
@@ -538,6 +613,7 @@ final class LiveProcessSystemTests: XCTestCase {
         XCTAssertGreaterThan(mine.memory, 0)
         XCTAssertGreaterThan(mine.cpuSeconds, 0)
         XCTAssertEqual(snap.selfPID, getpid())
+        XCTAssertEqual(mine.cwd, realPath(URL(fileURLWithPath: FileManager.default.currentDirectoryPath)))
     }
 
     func testEndsAChildProcess() throws {

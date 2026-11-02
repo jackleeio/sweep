@@ -52,6 +52,7 @@ public struct LiveProcessSystem: ProcessSystem {
                     entry.cpuSeconds = Double(usage.ri_user_time + usage.ri_system_time) * Self.secondsPerTick
                     entry.memory = Int64(usage.ri_phys_footprint)
                 }
+                entry.cwd = LiveProcessProbe.workingDirectory(of: pid)
             }
             processes.append(entry)
         }

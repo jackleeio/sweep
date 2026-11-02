@@ -207,6 +207,8 @@ public struct Config: Codable, Equatable {
         public var sessionIdleHours: Double = 24
         /// agent 起的 dev server 内存超过这个值时，即使在用也结束（Turbopack 常驻会一直涨）。0 表示关闭。
         public var devServerMemoryCapGB: Double = 0
+        /// 同一个项目里有多个 agent 起的 dev server 时，除了最近在用的那个，其余闲置这么久就结束。
+        public var duplicateDevServerIdleMinutes: Double = 30
         /// 命令行里含这些文字的进程（及其所在的进程树）不会被结束。
         public var excludes: [String] = []
 
@@ -224,6 +226,7 @@ public struct Config: Codable, Equatable {
             devServerIdleHours = try c.value(.devServerIdleHours, default: d.devServerIdleHours)
             sessionIdleHours = try c.value(.sessionIdleHours, default: d.sessionIdleHours)
             devServerMemoryCapGB = try c.value(.devServerMemoryCapGB, default: d.devServerMemoryCapGB)
+            duplicateDevServerIdleMinutes = try c.value(.duplicateDevServerIdleMinutes, default: d.duplicateDevServerIdleMinutes)
             excludes = try c.value(.excludes, default: d.excludes)
         }
 
